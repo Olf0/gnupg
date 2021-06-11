@@ -1232,6 +1232,16 @@ agent_scd_getattr (const char *name, struct agent_card_info_s *info)
   parm.ctx = agent_ctx;
   rc = assuan_transact (agent_ctx, line, NULL, NULL, default_inq_cb, &parm,
                         learn_status_cb, info);
+  if (!rc && !strcmp (name, "KEY-FPR"))
+    {
+      /* Let the agent create the shadow keys if not yet done.  */
+      if (info->fpr1len)
+        assuan_transact (agent_ctx, "READKEY --card --no-data -- $SIGNKEYID",
+                         NULL, NULL, NULL, NULL, NULL, NULL);
+      if (info->fpr2len)
+        assuan_transact (agent_ctx, "READKEY --card --no-data -- $ENCRKEYID",
+                         NULL, NULL, NULL, NULL, NULL, NULL);
+    }
 
   return rc;
 }
@@ -1699,6 +1709,7 @@ card_keyinfo_cb (void *opaque, const char *line)
   struct card_keyinfo_parm_s *parm = opaque;
   const char *keyword = line;
   int keywordlen;
+  keypair_info_t keyinfo = NULL;
 
   for (keywordlen=0; *line && !spacep (line); line++, keywordlen++)
     ;
@@ -1709,7 +1720,6 @@ card_keyinfo_cb (void *opaque, const char *line)
     {
       const char *s;
       int n;
-      keypair_info_t keyinfo;
       keypair_info_t *l_p = &parm->list;
 
       while ((*l_p))
@@ -1717,23 +1727,13 @@ card_keyinfo_cb (void *opaque, const char *line)
 
       keyinfo = xtrycalloc (1, sizeof *keyinfo);
       if (!keyinfo)
-        {
-        alloc_error:
-          if (!parm->error)
-            parm->error = gpg_error_from_syserror ();
-          return 0;
-        }
+        goto alloc_error;
 
       for (n=0,s=line; hexdigitp (s); s++, n++)
         ;
 
       if (n != 40)
-        {
-        parm_error:
-          if (!parm->error)
-            parm->error = gpg_error (GPG_ERR_ASS_PARAMETER);
-          return 0;
-        }
+        goto parm_error;
 
       memcpy (keyinfo->keygrip, line, 40);
       keyinfo->keygrip[40] = 0;
@@ -1787,6 +1787,18 @@ card_keyinfo_cb (void *opaque, const char *line)
     }
 
   return err;
+
+ alloc_error:
+  xfree (keyinfo);
+  if (!parm->error)
+    parm->error = gpg_error_from_syserror ();
+  return 0;
+
+ parm_error:
+  xfree (keyinfo);
+  if (!parm->error)
+    parm->error = gpg_error (GPG_ERR_ASS_PARAMETER);
+  return 0;
 }
 
 
@@ -2226,12 +2238,49 @@ agent_probe_any_secret_key (ctrl_t ctrl, kbnode_t keyblock)
   char line[ASSUAN_LINELENGTH];
   char *p;
   kbnode_t kbctx, node;
-  int nkeys;
+  int nkeys;  /* (always zero in secret_keygrips mode)  */
   unsigned char grip[KEYGRIP_LEN];
+  const unsigned char *s;
+  unsigned int n;
 
   err = start_agent (ctrl, 0);
   if (err)
     return err;
+
+  /* If we have not yet issued a "HAVEKEY --list" do that now.  We use
+   * a more or less arbitray limit of 1000 keys.  */
+  if (ctrl && !ctrl->secret_keygrips && !ctrl->no_more_secret_keygrips)
+    {
+      membuf_t data;
+
+      init_membuf (&data, 4096);
+      err = assuan_transact (agent_ctx, "HAVEKEY --list=1000",
+                             put_membuf_cb, &data,
+                             NULL, NULL, NULL, NULL);
+      if (err)
+        xfree (get_membuf (&data, NULL));
+      else
+        {
+          ctrl->secret_keygrips = get_membuf (&data,
+                                              &ctrl->secret_keygrips_len);
+          if (!ctrl->secret_keygrips)
+            err = gpg_error_from_syserror ();
+          if ((ctrl->secret_keygrips_len % 20))
+            {
+              err = gpg_error (GPG_ERR_INV_DATA);
+              xfree (ctrl->secret_keygrips);
+              ctrl->secret_keygrips = NULL;
+            }
+        }
+      if (err)
+        {
+          log_info ("problem with fast path key listing: %s - ignored\n",
+                    gpg_strerror (err));
+          err = 0;
+        }
+      /* We want to do this only once.  */
+      ctrl->no_more_secret_keygrips = 1;
+    }
 
   err = gpg_error (GPG_ERR_NO_SECKEY); /* Just in case no key was
                                           found in KEYBLOCK.  */
@@ -2242,23 +2291,42 @@ agent_probe_any_secret_key (ctrl_t ctrl, kbnode_t keyblock)
         || node->pkt->pkttype == PKT_SECRET_KEY
         || node->pkt->pkttype == PKT_SECRET_SUBKEY)
       {
-        if (nkeys && ((p - line) + 41) > (ASSUAN_LINELENGTH - 2))
+        if (ctrl && ctrl->secret_keygrips)
           {
-            err = assuan_transact (agent_ctx, line,
-                                   NULL, NULL, NULL, NULL, NULL, NULL);
-            if (err != gpg_err_code (GPG_ERR_NO_SECKEY))
-              break; /* Seckey available or unexpected error - ready.  */
-            p = stpcpy (line, "HAVEKEY");
-            nkeys = 0;
+            /* We got an array with all secret keygrips.  Check this.  */
+            err = keygrip_from_pk (node->pkt->pkt.public_key, grip);
+            if (err)
+              return err;
+            for (s=ctrl->secret_keygrips, n = 0;
+                 n < ctrl->secret_keygrips_len;
+                 s += 20, n += 20)
+              {
+                if (!memcmp (s, grip, 20))
+                  return 0;
+              }
+            err = gpg_error (GPG_ERR_NO_SECKEY);
+            /* Keep on looping over the keyblock.  Never bump nkeys.  */
           }
+        else
+          {
+            if (nkeys && ((p - line) + 41) > (ASSUAN_LINELENGTH - 2))
+              {
+                err = assuan_transact (agent_ctx, line,
+                                       NULL, NULL, NULL, NULL, NULL, NULL);
+                if (err != gpg_err_code (GPG_ERR_NO_SECKEY))
+                  break; /* Seckey available or unexpected error - ready.  */
+                p = stpcpy (line, "HAVEKEY");
+                nkeys = 0;
+              }
 
-        err = keygrip_from_pk (node->pkt->pkt.public_key, grip);
-        if (err)
-          return err;
-        *p++ = ' ';
-        bin2hex (grip, 20, p);
-        p += 40;
-        nkeys++;
+            err = keygrip_from_pk (node->pkt->pkt.public_key, grip);
+            if (err)
+              return err;
+            *p++ = ' ';
+            bin2hex (grip, 20, p);
+            p += 40;
+            nkeys++;
+          }
       }
 
   if (!err && nkeys)
@@ -2408,6 +2476,14 @@ agent_genkey (ctrl_t ctrl, char **cache_nonce_addr, char **passwd_nonce_addr,
   if (err)
     return err;
   dfltparm.ctx = agent_ctx;
+
+  /* Do not use our cache of secret keygrips anymore - this command
+   * would otherwise requiring to update that cache.  */
+  if (ctrl && ctrl->secret_keygrips)
+    {
+      xfree (ctrl->secret_keygrips);
+      ctrl->secret_keygrips = 0;
+    }
 
   if (timestamp)
     {
@@ -2865,6 +2941,14 @@ agent_import_key (ctrl_t ctrl, const char *desc, char **cache_nonce_addr,
   if (err)
     return err;
   dfltparm.ctx = agent_ctx;
+
+  /* Do not use our cache of secret keygrips anymore - this command
+   * would otherwise requiring to update that cache.  */
+  if (ctrl && ctrl->secret_keygrips)
+    {
+      xfree (ctrl->secret_keygrips);
+      ctrl->secret_keygrips = 0;
+    }
 
   if (timestamp)
     {

@@ -48,7 +48,6 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <string.h>
-#include <assert.h>
 #include <time.h>
 
 #include "scdaemon.h"
@@ -83,7 +82,7 @@ static struct {
                                  status bytes. */
   unsigned int try_extlen:2;           /* Large object; try to use an extended
                                  length APDU when !=0.  The size is
-                                 determined by extcap.max_certlen_3
+                                 determined by extcap.max_certlen
                                  when == 1, and by extcap.max_special_do
                                  when == 2.  */
   char *desc;
@@ -191,7 +190,7 @@ struct app_local_s {
   struct
   {
     unsigned int is_v2:1;              /* Compatible to v2 or later.        */
-    unsigned int extcap_v3:1;          /* Extcap is in v3 format.           */
+    unsigned int is_v3:1;              /* Comatible to v3 or later.         */
     unsigned int has_button:1;         /* Has confirmation button or not.   */
 
     unsigned int sm_supported:1;       /* Secure Messaging is supported.    */
@@ -206,7 +205,7 @@ struct app_local_s {
     unsigned int sm_algo:2;            /* Symmetric crypto algo for SM.     */
     unsigned int pin_blk2:1;           /* PIN block 2 format supported.     */
     unsigned int mse:1;                /* MSE command supported.            */
-    unsigned int max_certlen_3:16;
+    unsigned int max_certlen:16;       /* Maximum size of DO 7F21.          */
     unsigned int max_get_challenge:16; /* Maximum size for get_challenge.   */
     unsigned int max_special_do:16;    /* Maximum size for special DOs.     */
   } extcap;
@@ -218,6 +217,11 @@ struct app_local_s {
     unsigned int def_chv2:1;  /* Use 123456 for CHV2.  */
   } flags;
 
+  /* Flags used to override certain behavior.  */
+  struct
+  {
+    unsigned int cache_6e:1;
+  } override;
 
   /* Keep track on whether we cache a certain PIN so that we get it
    * from the cache only if we know we cached it.  This inhibits the
@@ -253,7 +257,8 @@ struct app_local_s {
       } rsa;
       struct {
         const char *curve;
-        int flags;
+        int algo;
+        unsigned int flags;
       } ecc;
     };
    } keyattr[3];
@@ -311,6 +316,7 @@ get_manufacturer (unsigned int no)
     case 0x1337: return "Warsaw Hackerspace";
     case 0x2342: return "warpzone"; /* hackerspace Muenster.  */
     case 0x4354: return "Confidential Technologies";   /* cotech.de */
+    case 0x5343: return "SSE Carte à puce";
     case 0x5443: return "TIF-IT e.V.";
     case 0x63AF: return "Trustica";
     case 0xBA53: return "c-base e.V.";
@@ -404,6 +410,9 @@ get_cached_data (app_t app, int tag,
   *result = NULL;
   *resultlen = 0;
 
+  if (tag == 0x6E && app->app_local->override.cache_6e)
+    get_immediate = 0;
+
   if (!get_immediate)
     {
       for (c=app->app_local->cache; c; c = c->next)
@@ -427,8 +436,8 @@ get_cached_data (app_t app, int tag,
   if (try_extlen && app->app_local->cardcap.ext_lc_le)
     {
       if (try_extlen == 1)
-        exmode = app->app_local->extcap.max_certlen_3;
-      else if (try_extlen == 2 && app->app_local->extcap.extcap_v3)
+        exmode = app->app_local->extcap.max_certlen;
+      else if (try_extlen == 2 && app->app_local->extcap.is_v3)
         exmode = app->app_local->extcap.max_special_do;
       else
         exmode = 0;
@@ -457,7 +466,7 @@ get_cached_data (app_t app, int tag,
 
   /* Okay, cache it. */
   for (c=app->app_local->cache; c; c = c->next)
-    assert (c->tag != tag);
+    log_assert (c->tag != tag);
 
   c = xtrymalloc (sizeof *c + len);
   if (c)
@@ -496,7 +505,7 @@ flush_cache_item (app_t app, int tag)
 
         for (c=app->app_local->cache; c ; c = c->next)
           {
-            assert (c->tag != tag); /* Oops: duplicated entry. */
+            log_assert (c->tag != tag); /* Oops: duplicated entry. */
           }
         return;
       }
@@ -723,7 +732,7 @@ count_sos_bits (const unsigned char *a, size_t len)
   unsigned int n = len * 8;
   int i;
 
-  if (*a == 0)
+  if (len == 0 || *a == 0)
     return n;
 
   for (i=7; i && !(*a & (1<<i)); i--)
@@ -912,11 +921,11 @@ store_fpr (app_t app, int keynumber, u32 timestamp, unsigned char *fpr,
           *p++ = nbits;
         }
       else if (i == 1)
-	{
+        {
           nbits = count_sos_bits (m[i], mlen[i]);
           *p++ = nbits >> 8;
           *p++ = nbits;
-	}
+        }
       memcpy (p, m[i], mlen[i]);
       p += mlen[i];
     }
@@ -1043,9 +1052,7 @@ send_key_attr (ctrl_t ctrl, app_t app, const char *keyword, int keyno)
     {
       snprintf (buffer, sizeof buffer, "%d %d %s",
                 keyno+1,
-                keyno==1? PUBKEY_ALGO_ECDH :
-                (app->app_local->keyattr[keyno].ecc.flags & ECC_FLAG_DJB_TWEAK)?
-                PUBKEY_ALGO_EDDSA : PUBKEY_ALGO_ECDSA,
+                app->app_local->keyattr[keyno].ecc.algo,
                 app->app_local->keyattr[keyno].ecc.curve);
     }
   else
@@ -1142,6 +1149,7 @@ do_getattr (app_t app, ctrl_t ctrl, const char *name)
     {
       char tmp[110];
 
+      /* Noet that with v3 cards mcl3 is used for all certificates.  */
       snprintf (tmp, sizeof tmp,
                 "gc=%d ki=%d fc=%d pd=%d mcl3=%u aac=%d "
                 "sm=%d si=%u dec=%d bt=%d kdf=%d",
@@ -1149,7 +1157,7 @@ do_getattr (app_t app, ctrl_t ctrl, const char *name)
                 app->app_local->extcap.key_import,
                 app->app_local->extcap.change_force_chv,
                 app->app_local->extcap.private_dos,
-                app->app_local->extcap.max_certlen_3,
+                app->app_local->extcap.max_certlen,
                 app->app_local->extcap.algo_attr_change,
                 (app->app_local->extcap.sm_supported
                  ? (app->app_local->extcap.sm_algo == 0? CIPHER_ALGO_3DES :
@@ -1439,7 +1447,7 @@ retrieve_fpr_from_card (app_t app, int keyno, char *fpr)
   unsigned char *value;
   size_t valuelen;
 
-  assert (keyno >=0 && keyno <= 2);
+  log_assert (keyno >=0 && keyno <= 2);
 
   relptr = get_one_do (app, 0x00C5, &value, &valuelen, NULL);
   if (relptr && valuelen >= 60)
@@ -1761,18 +1769,11 @@ ecc_read_pubkey (app_t app, ctrl_t ctrl, u32 created_at, int keyno,
       send_key_data (ctrl, "curve", oidbuf, oid_len);
     }
 
+  algo = app->app_local->keyattr[keyno].ecc.algo;
   if (keyno == 1)
     {
       if (ctrl)
         send_key_data (ctrl, "kdf/kek", ecdh_params (curve), (size_t)4);
-      algo = PUBKEY_ALGO_ECDH;
-    }
-  else
-    {
-      if ((app->app_local->keyattr[keyno].ecc.flags & ECC_FLAG_DJB_TWEAK))
-        algo = PUBKEY_ALGO_EDDSA;
-      else
-        algo = PUBKEY_ALGO_ECDSA;
     }
 
   if (ctrl)
@@ -2055,7 +2056,7 @@ send_keypair_info (app_t app, ctrl_t ctrl, int key)
   if (err)
     goto leave;
 
-  assert (keyno >= 0 && keyno <= 2);
+  log_assert (keyno >= 0 && keyno <= 2);
   if (!app->app_local->pk[keyno].key)
     goto leave; /* No such key - ignore. */
 
@@ -2244,39 +2245,73 @@ do_readkey (app_t app, ctrl_t ctrl, const char *keyid, unsigned int flags,
 
 /* Read the standard certificate of an OpenPGP v2 card.  It is
    returned in a freshly allocated buffer with that address stored at
-   CERT and the length of the certificate stored at CERTLEN.  CERTID
-   needs to be set to "OPENPGP.3".  */
+   CERT and the length of the certificate stored at CERTLEN.  */
 static gpg_error_t
 do_readcert (app_t app, const char *certid,
              unsigned char **cert, size_t *certlen)
 {
   gpg_error_t err;
-  unsigned char *buffer;
-  size_t buflen;
-  void *relptr;
+  int occurrence = 0;
 
   *cert = NULL;
   *certlen = 0;
-  if (strcmp (certid, "OPENPGP.3"))
+  if (!ascii_strcasecmp (certid, "OPENPGP.3"))
+    ;
+  else if (!ascii_strcasecmp (certid, "OPENPGP.2"))
+    occurrence = 1;
+  else if (!ascii_strcasecmp (certid, "OPENPGP.1"))
+    occurrence = 2;
+  else
     return gpg_error (GPG_ERR_INV_ID);
+  if (!app->app_local->extcap.is_v3 && occurrence)
+    return gpg_error (GPG_ERR_NOT_SUPPORTED);
   if (!app->app_local->extcap.is_v2)
     return gpg_error (GPG_ERR_NOT_FOUND);
 
-  relptr = get_one_do (app, 0x7F21, &buffer, &buflen, NULL);
-  if (!relptr)
-    return gpg_error (GPG_ERR_NOT_FOUND);
+  if (occurrence)
+    {
+      int exmode;
 
-  if (!buflen)
-    err = gpg_error (GPG_ERR_NOT_FOUND);
-  else if (!(*cert = xtrymalloc (buflen)))
-    err = gpg_error_from_syserror ();
+      err = iso7816_select_data (app_get_slot (app), occurrence, 0x7F21);
+      if (!err)
+        {
+          if (app->app_local->cardcap.ext_lc_le)
+            exmode = app->app_local->extcap.max_certlen;
+          else
+            exmode = 0;
+
+          err = iso7816_get_data (app_get_slot (app), exmode, 0x7F21,
+                                  cert, certlen);
+          /* We reset the curDO even for an error.  */
+          iso7816_select_data (app_get_slot (app), 0, 0x7F21);
+        }
+
+      if (err)
+        err = gpg_error (GPG_ERR_NOT_FOUND);
+    }
   else
     {
-      memcpy (*cert, buffer, buflen);
-      *certlen = buflen;
-      err  = 0;
+      unsigned char *buffer;
+      size_t buflen;
+      void *relptr;
+
+      relptr = get_one_do (app, 0x7F21, &buffer, &buflen, NULL);
+      if (!relptr)
+        return gpg_error (GPG_ERR_NOT_FOUND);
+
+      if (!buflen)
+        err = gpg_error (GPG_ERR_NOT_FOUND);
+      else if (!(*cert = xtrymalloc (buflen)))
+        err = gpg_error_from_syserror ();
+      else
+        {
+          memcpy (*cert, buffer, buflen);
+          *certlen = buflen;
+          err = 0;
+        }
+      xfree (relptr);
     }
-  xfree (relptr);
+
   return err;
 }
 
@@ -2908,6 +2943,7 @@ do_setattr (app_t app, ctrl_t ctrl, const char *name,
     int need_chv;
     int special;
     unsigned int need_v2:1;
+    unsigned int need_v3:1;
   } table[] = {
     { "DISP-NAME",    0x005B, 0,      3 },
     { "LOGIN-DATA",   0x005E, 0,      3, 2 },
@@ -2922,6 +2958,8 @@ do_setattr (app_t app, ctrl_t ctrl, const char *name,
     { "PRIVATE-DO-2", 0x0102, 0,      3 },
     { "PRIVATE-DO-3", 0x0103, 0,      2 },
     { "PRIVATE-DO-4", 0x0104, 0,      3 },
+    { "CERT-1",       0x7F21, 0,      3,11, 1, 1 },
+    { "CERT-2",       0x7F21, 0,      3,12, 1, 1 },
     { "CERT-3",       0x7F21, 0,      3, 0, 1 },
     { "SM-KEY-ENC",   0x00D1, 0,      3, 0, 1 },
     { "SM-KEY-MAC",   0x00D2, 0,      3, 0, 1 },
@@ -2940,7 +2978,9 @@ do_setattr (app_t app, ctrl_t ctrl, const char *name,
   if (!table[idx].name)
     return gpg_error (GPG_ERR_INV_NAME);
   if (table[idx].need_v2 && !app->app_local->extcap.is_v2)
-    return gpg_error (GPG_ERR_NOT_SUPPORTED); /* Not yet supported.  */
+    return gpg_error (GPG_ERR_NOT_SUPPORTED);
+  if (table[idx].need_v3 && !app->app_local->extcap.is_v3)
+    return gpg_error (GPG_ERR_NOT_SUPPORTED);
 
   if (table[idx].special == 5 && app->app_local->extcap.has_button == 0)
     return gpg_error (GPG_ERR_INV_OBJ);
@@ -3065,8 +3105,23 @@ do_setattr (app_t app, ctrl_t ctrl, const char *name,
       flush_cache_item (app, 0x00F9);
     }
 
-  rc = iso7816_put_data (app_get_slot (app),
-                         exmode, table[idx].tag, value, valuelen);
+
+  if (table[idx].special == 11 || table[idx].special == 12) /* CERT-1 or -2 */
+    {
+      rc = iso7816_select_data (app_get_slot (app),
+                                table[idx].special == 11? 2 : 1,
+                                table[idx].tag);
+      if (!rc)
+        {
+          rc = iso7816_put_data (app_get_slot (app),
+                                 exmode, table[idx].tag, value, valuelen);
+          /* We better reset the curDO.  */
+          iso7816_select_data (app_get_slot (app), 0, table[idx].tag);
+        }
+    }
+  else  /* Standard.  */
+    rc = iso7816_put_data (app_get_slot (app),
+                           exmode, table[idx].tag, value, valuelen);
   if (rc)
     log_error ("failed to set '%s': %s\n", table[idx].name, gpg_strerror (rc));
 
@@ -3102,15 +3157,25 @@ do_writecert (app_t app, ctrl_t ctrl,
               void *pincb_arg,
               const unsigned char *certdata, size_t certdatalen)
 {
-  if (strcmp (certidstr, "OPENPGP.3"))
+  const char *name;
+  if (!ascii_strcasecmp (certidstr, "OPENPGP.3"))
+    name = "CERT-3";
+  else if (!ascii_strcasecmp (certidstr, "OPENPGP.2"))
+    name = "CERT-2";
+  else if (!ascii_strcasecmp (certidstr, "OPENPGP.1"))
+    name = "CERT-1";
+  else
     return gpg_error (GPG_ERR_INV_ID);
+
   if (!certdata || !certdatalen)
     return gpg_error (GPG_ERR_INV_ARG);
   if (!app->app_local->extcap.is_v2)
     return gpg_error (GPG_ERR_NOT_SUPPORTED);
-  if (certdatalen > app->app_local->extcap.max_certlen_3)
+  /* do_setattr checks that CERT-2 and CERT-1 requires a v3 card.  */
+
+  if (certdatalen > app->app_local->extcap.max_certlen)
     return gpg_error (GPG_ERR_TOO_LARGE);
-  return do_setattr (app, ctrl, "CERT-3", pincb, pincb_arg,
+  return do_setattr (app, ctrl, name, pincb, pincb_arg,
                      certdata, certdatalen);
 }
 
@@ -3390,7 +3455,7 @@ do_change_pin (app_t app, ctrl_t ctrl,  const char *chvnostr,
 
       rc = pin2hash_if_kdf (app, 0, resetcode, &result1, &resultlen1);
       if (!rc)
-        rc = pin2hash_if_kdf (app, 0, pinvalue, &result2, &resultlen2);
+        rc = pin2hash_if_kdf (app, 1, pinvalue, &result2, &resultlen2);
       if (!rc)
         {
           bufferlen = resultlen1 + resultlen2;
@@ -3412,7 +3477,9 @@ do_change_pin (app_t app, ctrl_t ctrl,  const char *chvnostr,
     }
   else if (set_resetcode)
     {
-      if (strlen (pinvalue) < 8)
+      size_t bufferlen = strlen (pinvalue);
+
+      if (bufferlen != 0 && bufferlen < 8)
         {
           log_error (_("Reset Code is too short; minimum length is %d\n"), 8);
           rc = gpg_error (GPG_ERR_BAD_PIN);
@@ -3420,7 +3487,6 @@ do_change_pin (app_t app, ctrl_t ctrl,  const char *chvnostr,
       else
         {
           char *buffer = NULL;
-          size_t bufferlen;
 
           rc = pin2hash_if_kdf (app, 0, pinvalue, &buffer, &bufferlen);
           if (!rc)
@@ -3468,7 +3534,7 @@ do_change_pin (app_t app, ctrl_t ctrl,  const char *chvnostr,
   else
     {
       /* Version 2 cards.  */
-      assert (chvno == 1 || chvno == 3);
+      log_assert (chvno == 1 || chvno == 3);
 
       if (use_pinpad)
         {
@@ -3529,7 +3595,7 @@ does_key_exist (app_t app, int keyidx, int generating, int force)
   size_t buflen, n;
   int i;
 
-  assert (keyidx >=0 && keyidx <= 2);
+  log_assert (keyidx >=0 && keyidx <= 2);
 
   if (iso7816_get_data (app_get_slot (app), 0, 0x006E, &buffer, &buflen))
     {
@@ -3569,7 +3635,7 @@ add_tlv (unsigned char *buffer, unsigned int tag, size_t length)
 {
   unsigned char *p = buffer;
 
-  assert (tag <= 0xffff);
+  log_assert (tag <= 0xffff);
   if ( tag > 0xff )
     *p++ = tag >> 8;
   *p++ = tag;
@@ -3633,7 +3699,7 @@ build_privkey_template (app_t app, int keyno,
 
   /* Get the required length for E. Rounded up to the nearest byte  */
   rsa_e_reqlen = (app->app_local->keyattr[keyno].rsa.e_bits + 7) / 8;
-  assert (rsa_e_len <= rsa_e_reqlen);
+  log_assert (rsa_e_len <= rsa_e_reqlen);
 
   /* Build the 7f48 cardholder private key template.  */
   datalen = 0;
@@ -3732,7 +3798,7 @@ build_privkey_template (app_t app, int keyno,
 
   /* Sanity check.  We don't know the exact length because we
      allocated 3 bytes for the first length header.  */
-  assert (tp - template <= template_size);
+  log_assert (tp - template <= template_size);
 
   *result = template;
   *resultlen = tp - template;
@@ -3839,7 +3905,7 @@ build_ecc_privkey_template (app_t app, int keyno,
       tp += ecc_q_len;
     }
 
-  assert (tp - template == template_size);
+  log_assert (tp - template == template_size);
 
   *result = template;
   *resultlen = tp - template;
@@ -3857,7 +3923,7 @@ change_keyattr (app_t app, ctrl_t ctrl,
 {
   gpg_error_t err;
 
-  assert (keyno >=0 && keyno <= 2);
+  log_assert (keyno >=0 && keyno <= 2);
 
   /* Prepare for storing the key.  */
   err = verify_chv3 (app, ctrl, pincb, pincb_arg);
@@ -4372,7 +4438,7 @@ rsa_writekey (app_t app, ctrl_t ctrl,
          0xC1   <length> prime p
          0xC2   <length> prime q
       */
-      assert (rsa_e_len <= 4);
+      log_assert (rsa_e_len <= 4);
       template_len = (1 + 1 + 4
                       + 1 + 1 + rsa_p_len
                       + 1 + 1 + rsa_q_len);
@@ -4403,7 +4469,7 @@ rsa_writekey (app_t app, ctrl_t ctrl,
       memcpy (tp, rsa_q, rsa_q_len);
       tp += rsa_q_len;
 
-      assert (tp - template == template_len);
+      log_assert (tp - template == template_len);
 
       /* Prepare for storing the key.  */
       err = verify_chv3 (app, ctrl, pincb, pincb_arg);
@@ -4464,6 +4530,8 @@ ecc_writekey (app_t app, ctrl_t ctrl,
      curve = "secp256k1" */
   /* (private-key(ecc(curve%s)(flags eddsa)(q%m)(d%m))(created-at%d)):
       curve = "Ed25519" */
+  /* (private-key(ecc(curve%s)(q%m)(d%m))(created-at%d)):
+      curve = "Ed448" */
   last_depth1 = depth;
   while (!(err = parse_sexp (&buf, &buflen, &depth, &tok, &toklen))
          && depth && depth >= last_depth1)
@@ -4511,12 +4579,11 @@ ecc_writekey (app_t app, ctrl_t ctrl,
         {
           const unsigned char **buf2;
           size_t *buf2len;
-          int native = flag_djb_tweak;
 
           switch (*tok)
             {
             case 'q': buf2 = &ecc_q; buf2len = &ecc_q_len; break;
-            case 'd': buf2 = &ecc_d; buf2len = &ecc_d_len; native = 0; break;
+            case 'd': buf2 = &ecc_d; buf2len = &ecc_d_len; break;
             default: buf2 = NULL;  buf2len = NULL; break;
             }
           if (buf2 && *buf2)
@@ -4528,11 +4595,6 @@ ecc_writekey (app_t app, ctrl_t ctrl,
             goto leave;
           if (tok && buf2)
             {
-              if (!native)
-                /* Strip off leading zero bytes and save. */
-                for (;toklen && !*tok; toklen--, tok++)
-                  ;
-
               *buf2 = tok;
               *buf2len = toklen;
             }
@@ -4592,10 +4654,10 @@ ecc_writekey (app_t app, ctrl_t ctrl,
       err = gpg_error (GPG_ERR_INV_VALUE);
       goto leave;
     }
-  if (flag_djb_tweak && keyno != 1)
-    algo = PUBKEY_ALGO_EDDSA;
-  else if (keyno == 1)
+  if (keyno == 1)
     algo = PUBKEY_ALGO_ECDH;
+  else if (!strcmp (curve, "Ed25519") || !strcmp (curve, "Ed448"))
+    algo = PUBKEY_ALGO_EDDSA;
   else
     algo = PUBKEY_ALGO_ECDSA;
 
@@ -4950,7 +5012,7 @@ compare_fingerprint (app_t app, int keyno, unsigned char *sha1fpr)
   size_t buflen, n;
   int rc, i;
 
-  assert (keyno >= 0 && keyno <= 2);
+  log_assert (keyno >= 0 && keyno <= 2);
 
   rc = get_cached_data (app, 0x006E, &buffer, &buflen, 0, 0);
   if (rc)
@@ -5193,7 +5255,7 @@ do_sign (app_t app, ctrl_t ctrl, const char *keyidstr, int hashalgo,
   if (hashalgo == GCRY_MD_ ## a && (d) )                      \
     {                                                         \
       datalen = sizeof b ## _prefix + indatalen;              \
-      assert (datalen <= sizeof data);                        \
+      log_assert (datalen <= sizeof data);                        \
       memcpy (data, b ## _prefix, sizeof b ## _prefix);       \
       memcpy (data + sizeof b ## _prefix, indata, indatalen); \
     }
@@ -5760,7 +5822,7 @@ static void
 show_caps (struct app_local_s *s)
 {
   log_info ("Version-2+ .....: %s\n", s->extcap.is_v2? "yes":"no");
-  log_info ("Extcap-v3 ......: %s\n", s->extcap.extcap_v3? "yes":"no");
+  log_info ("Version-3+ .....: %s\n", s->extcap.is_v3? "yes":"no");
   log_info ("Button .........: %s\n", s->extcap.has_button? "yes":"no");
 
   log_info ("SM-Support .....: %s", s->extcap.sm_supported? "yes":"no");
@@ -5776,8 +5838,8 @@ show_caps (struct app_local_s *s)
   log_info ("Algo-Attr-Change: %s\n", s->extcap.algo_attr_change? "yes":"no");
   log_info ("Symmetric Crypto: %s\n", s->extcap.has_decrypt? "yes":"no");
   log_info ("KDF-Support ....: %s\n", s->extcap.kdf_do? "yes":"no");
-  log_info ("Max-Cert3-Len ..: %u\n", s->extcap.max_certlen_3);
-  if (s->extcap.extcap_v3)
+  log_info ("Max-Cert-Len ...: %u\n", s->extcap.max_certlen);
+  if (s->extcap.is_v3)
     {
       log_info ("PIN-Block-2 ....: %s\n", s->extcap.pin_blk2? "yes":"no");
       log_info ("MSE-Support ....: %s\n", s->extcap.mse? "yes":"no");
@@ -5980,6 +6042,7 @@ parse_algorithm_attribute (app_t app, int keyno)
     {
       int oidlen = buflen - 1;
 
+      app->app_local->keyattr[keyno].ecc.algo = *buffer;
       app->app_local->keyattr[keyno].ecc.flags = 0;
 
       if (buffer[buflen-1] == 0x00 || buffer[buflen-1] == 0xff)
@@ -5997,7 +6060,9 @@ parse_algorithm_attribute (app_t app, int keyno)
         {
           app->app_local->keyattr[keyno].key_type = KEY_TYPE_ECC;
           app->app_local->keyattr[keyno].ecc.curve = curve;
-          if (*buffer == PUBKEY_ALGO_EDDSA
+          if ((*buffer == PUBKEY_ALGO_EDDSA
+               && !strcmp (app->app_local->keyattr[keyno].ecc.curve,
+                           "Ed25519"))
               || (*buffer == PUBKEY_ALGO_ECDH
                   && !strcmp (app->app_local->keyattr[keyno].ecc.curve,
                               "Curve25519")))
@@ -6139,13 +6204,16 @@ app_select_openpgp (app_t app)
           goto leave;
         }
 
+      /* We want to temporary cache the DO 6E.  */
+      app->app_local->override.cache_6e = 1;
+
       app->app_local->manufacturer = manufacturer;
 
       if (app->appversion >= 0x0200)
         app->app_local->extcap.is_v2 = 1;
 
       if (app->appversion >= 0x0300)
-        app->app_local->extcap.extcap_v3 = 1;
+        app->app_local->extcap.is_v3 = 1;
 
       /* Read the historical bytes.  */
       relptr = get_one_do (app, 0x5f52, &buffer, &buflen, NULL);
@@ -6196,10 +6264,10 @@ app_select_openpgp (app_t app)
           app->app_local->extcap.sm_algo = buffer[1];
           app->app_local->extcap.max_get_challenge
                                                = (buffer[2] << 8 | buffer[3]);
-          app->app_local->extcap.max_certlen_3 = (buffer[4] << 8 | buffer[5]);
+          app->app_local->extcap.max_certlen = (buffer[4] << 8 | buffer[5]);
 
           /* Interpretation is different between v2 and v3, unfortunately.  */
-          if (app->app_local->extcap.extcap_v3)
+          if (app->app_local->extcap.is_v3)
             {
               app->app_local->extcap.max_special_do
                 = (buffer[6] << 8 | buffer[7]);
@@ -6217,8 +6285,10 @@ app_select_openpgp (app_t app)
       /* Check optional DO of "General Feature Management" for button.  */
       relptr = get_one_do (app, 0x7f74, &buffer, &buflen, NULL);
       if (relptr)
-        /* It must be: 03 81 01 20 */
-        app->app_local->extcap.has_button = 1;
+        {
+          /* It must be: 03 81 01 20 */
+          app->app_local->extcap.has_button = 1;
+        }
 
       parse_login_data (app);
 
@@ -6231,6 +6301,9 @@ app_select_openpgp (app_t app)
 
       if (opt.verbose > 1)
         dump_all_do (slot);
+
+      app->app_local->override.cache_6e = 0;
+      flush_cache_item (app, 0x6E);
 
       app->fnc.deinit = do_deinit;
       app->fnc.prep_reselect = do_prep_reselect;

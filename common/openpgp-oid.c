@@ -49,7 +49,7 @@ static struct {
   { "Curve25519", "1.3.6.1.4.1.3029.1.5.1", 255, "cv25519", PUBKEY_ALGO_ECDH },
   { "Ed25519",    "1.3.6.1.4.1.11591.15.1", 255, "ed25519", PUBKEY_ALGO_EDDSA },
   { "X448",       "1.3.101.111",            448, "cv448",   PUBKEY_ALGO_ECDH },
-  { "Ed448",      "1.3.101.113",            448, "ed448",   PUBKEY_ALGO_EDDSA },
+  { "Ed448",      "1.3.101.113",            456, "ed448",   PUBKEY_ALGO_EDDSA },
 
   { "NIST P-256",      "1.2.840.10045.3.1.7",    256, "nistp256" },
   { "NIST P-384",      "1.3.132.0.34",           384, "nistp384" },
@@ -82,6 +82,10 @@ static const char oid_cv25519[] =
  * for the curve in libgcrypt.
  */
 static const char oid_cv448[] = { 0x03, 0x2b, 0x65, 0x6f };
+
+/* The OID for Ed448 in OpenPGP format. */
+static const char oid_ed448[] = { 0x03, 0x2b, 0x65, 0x71 };
+
 
 /* A table to store keyalgo strings like "rsa2048 or "ed25519" so that
  * we do not need to allocate them.  This is currently a simple array
@@ -346,6 +350,15 @@ openpgp_oidbuf_is_cv25519 (const void *buf, size_t len)
 }
 
 
+/* Return true if (BUF,LEN) represents the OID for Ed448.  */
+static int
+openpgp_oidbuf_is_ed448 (const void *buf, size_t len)
+{
+  return (buf && len == DIM (oid_ed448)
+          && !memcmp (buf, oid_ed448, DIM (oid_ed448)));
+}
+
+
 /* Return true if (BUF,LEN) represents the OID for X448.  */
 static int
 openpgp_oidbuf_is_cv448 (const void *buf, size_t len)
@@ -367,6 +380,21 @@ openpgp_oid_is_cv25519 (gcry_mpi_t a)
 
   buf = gcry_mpi_get_opaque (a, &nbits);
   return openpgp_oidbuf_is_cv25519 (buf, (nbits+7)/8);
+}
+
+
+/* Return true if the MPI A represents the OID for Ed448.  */
+int
+openpgp_oid_is_ed448 (gcry_mpi_t a)
+{
+  const unsigned char *buf;
+  unsigned int nbits;
+
+  if (!a || !gcry_mpi_get_flag (a, GCRYMPI_FLAG_OPAQUE))
+    return 0;
+
+  buf = gcry_mpi_get_opaque (a, &nbits);
+  return openpgp_oidbuf_is_ed448 (buf, (nbits+7)/8);
 }
 
 

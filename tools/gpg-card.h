@@ -125,6 +125,9 @@ struct key_info_s
   const char *keyalgo;
   enum gcry_pk_algos keyalgo_id;
 
+  /* An optional malloced label for the key.  */
+  char *label;
+
   /* The three next items are mostly useful for OpenPGP cards.  */
   unsigned char fprlen;  /* Use length of the next item.  */
   unsigned char fpr[32]; /* The binary fingerprint of length FPRLEN.  */
@@ -172,8 +175,11 @@ struct card_info_s
                         required for each signing.  Note that the
                         gpg-agent might cache it anyway. */
   int is_v2;         /* True if this is a v2 openpgp card.  */
+  byte nchvmaxlen;   /* Number of valid items in CHVMAXLEN.  */
   int chvmaxlen[4];  /* Maximum allowed length of a CHV. */
+  byte nchvinfo;     /* Number of valid items in CHVINFO.  */
   int chvinfo[4];    /* Allowed retries for the CHV; 0 = blocked. */
+  char *chvlabels;   /* Malloced String with CHV labels.  */
   unsigned char chvusage[2]; /* Data object 5F2F */
   struct {
     unsigned int ki:1;     /* Key import available.  */
@@ -221,7 +227,7 @@ gpg_error_t scd_apdu (const char *hexapdu, const char *options,
 gpg_error_t scd_switchcard (const char *serialno);
 gpg_error_t scd_switchapp (const char *appname);
 
-gpg_error_t scd_learn (card_info_t info);
+gpg_error_t scd_learn (card_info_t info, int reread);
 gpg_error_t scd_getattr (const char *name, struct card_info_s *info);
 gpg_error_t scd_setattr (const char *name,
                          const unsigned char *value, size_t valuelen);
@@ -234,7 +240,8 @@ gpg_error_t scd_serialno (char **r_serialno, const char *demand);
 
 gpg_error_t scd_readcert (const char *certidstr,
                           void **r_buf, size_t *r_buflen);
-gpg_error_t scd_readkey (const char *keyrefstr, gcry_sexp_t *r_result);
+gpg_error_t scd_readkey (const char *keyrefstr, int create_shadow,
+                         gcry_sexp_t *r_result);
 gpg_error_t scd_cardlist (strlist_t *result);
 gpg_error_t scd_applist (strlist_t *result, int all);
 gpg_error_t scd_change_pin (const char *pinref, int reset_mode, int nullpin);

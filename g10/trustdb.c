@@ -232,7 +232,7 @@ release_key_array ( struct key_array *keys )
  * before initializing the validation module.
  * FIXME: Should be replaced by a function to add those keys to the trustdb.
  */
-void
+static void
 tdb_register_trusted_keyid (u32 *keyid)
 {
   struct key_item *k;
@@ -257,21 +257,21 @@ tdb_register_trusted_key (const char *string)
     {
       if (desc.mode == KEYDB_SEARCH_MODE_LONG_KID)
         {
-          register_trusted_keyid (desc.u.kid);
+          tdb_register_trusted_keyid (desc.u.kid);
           return;
         }
       if (desc.mode == KEYDB_SEARCH_MODE_FPR && desc.fprlen == 20)
         {
           kid[0] = buf32_to_u32 (desc.u.fpr+12);
           kid[1] = buf32_to_u32 (desc.u.fpr+16);
-          register_trusted_keyid (kid);
+          tdb_register_trusted_keyid (kid);
           return;
         }
       if (desc.mode == KEYDB_SEARCH_MODE_FPR && desc.fprlen == 32)
         {
           kid[0] = buf32_to_u32 (desc.u.fpr);
           kid[1] = buf32_to_u32 (desc.u.fpr+4);
-          register_trusted_keyid (kid);
+          tdb_register_trusted_keyid (kid);
           return;
         }
     }
@@ -340,7 +340,7 @@ verify_own_keys (ctrl_t ctrl)
           PKT_public_key pk;
 
           memset (&pk, 0, sizeof pk);
-          rc = get_pubkey (ctrl, &pk, k->kid);
+          rc = get_pubkey_with_ldap_fallback (ctrl, &pk, k->kid);
           if (rc)
 	    log_info(_("key %s: no public key for trusted key - skipped\n"),
 		     keystr(k->kid));
@@ -479,7 +479,7 @@ how_to_fix_the_trustdb ()
     name = "trustdb.gpg";
 
   log_info (_("You may try to re-create the trustdb using the commands:\n"));
-  log_info ("  cd %s\n", default_homedir ());
+  log_info ("  cd %s\n", gnupg_homedir ());
   log_info ("  %s --export-ownertrust > otrust.tmp\n", GPG_NAME);
 #ifdef HAVE_W32_SYSTEM
   log_info ("  del %s\n", name);
@@ -1430,6 +1430,7 @@ ask_ownertrust (ctrl_t ctrl, u32 *kid, int minimum)
     {
       log_error (_("public key %s not found: %s\n"),
                  keystr(kid), gpg_strerror (rc) );
+      free_public_key (pk);
       return TRUST_UNKNOWN;
     }
 

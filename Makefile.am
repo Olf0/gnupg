@@ -32,6 +32,7 @@ RELEASE_ARCHIVE_SUFFIX  = gnupg/v2.3
 
 # Autoconf flags.
 ACLOCAL_AMFLAGS = -I m4
+AM_DISTCHECK_DVI_TARGET = pdf
 AM_DISTCHECK_CONFIGURE_FLAGS = --enable-gnupg-builddir-envvar \
   --enable-all-tests --enable-g13 \
   --enable-gpgtar --enable-wks-tools --disable-ntbtls
@@ -106,7 +107,7 @@ tests =
 else
 tests = tests
 endif
-if HAVE_LIBTSS
+if BUILD_TPM2D
 tpm2d = tpm2d
 else
 tpm2d =
@@ -212,7 +213,7 @@ release:
 
 sign-release:
 	 +(set -e; \
-	  cd dist; \
+	  test $$(pwd | sed 's,.*/,,') = dist || cd dist; \
 	  x=$$(grep '^RELEASE_ARCHIVE=' $$HOME/.gnupg-autogen.rc|cut -d= -f2);\
           if [ -z "$$x" ]; then \
              echo "error: RELEASE_ARCHIVE missing in ~/.gnupg-autogen.rc">&2; \

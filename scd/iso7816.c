@@ -32,6 +32,7 @@
 
 
 #define CMD_SELECT_FILE 0xA4
+#define CMD_SELECT_DATA 0xA5
 #define CMD_VERIFY                ISO7816_VERIFY
 #define CMD_CHANGE_REFERENCE_DATA ISO7816_CHANGE_REFERENCE_DATA
 #define CMD_RESET_RETRY_COUNTER   ISO7816_RESET_RETRY_COUNTER
@@ -470,6 +471,44 @@ iso7816_reset_retry_counter (int slot, int chvno,
 }
 
 
+/* Perform a SELECT DATA command to OCCURANCE of TAG.  */
+gpg_error_t
+iso7816_select_data (int slot, int occurrence, int tag)
+{
+  int sw;
+  int datalen;
+  unsigned char data[7];
+
+  data[0] = 0x60;
+  data[2] = 0x5c;
+  if (tag <= 0xff)
+    {
+      data[3] = 1;
+      data[4] = tag;
+      datalen = 5;
+    }
+  else if (tag <= 0xffff)
+    {
+      data[3] = 2;
+      data[4] = (tag >> 8);
+      data[5] = tag;
+      datalen = 6;
+    }
+  else
+    {
+      data[3] = 3;
+      data[4] = (tag >> 16);
+      data[5] = (tag >> 8);
+      data[6] = tag;
+      datalen = 7;
+    }
+  data[1] = datalen - 2;
+
+  sw = apdu_send_le (slot, 0, 0x00, CMD_SELECT_DATA,
+                     occurrence, 0x04, datalen, data, 0, NULL, NULL);
+  return map_sw (sw);
+}
+
 
 /* Perform a GET DATA command requesting TAG and storing the result in
    a newly allocated buffer at the address passed by RESULT.  Return
@@ -706,6 +745,67 @@ iso7816_decipher (int slot, int extended_mode,
                          datalen, (const char *)data, le,
                          result, resultlen);
     }
+  if (sw != SW_SUCCESS)
+    {
+      /* Make sure that pending buffers are released. */
+      xfree (*result);
+      *result = NULL;
+      *resultlen = 0;
+      return map_sw (sw);
+    }
+
+  return 0;
+}
+
+
+/* Perform the security operation COMPUTE SHARED SECRET.  On success 0
+   is returned and the shared secret is available in a newly allocated
+   buffer stored at RESULT with its length stored at RESULTLEN.  For
+   LE see do_generate_keypair. */
+gpg_error_t
+iso7816_pso_csv (int slot, int extended_mode,
+                 const unsigned char *data, size_t datalen, int le,
+                 unsigned char **result, size_t *resultlen)
+{
+  int sw;
+  unsigned char *buf;
+  unsigned int nbuf;
+
+  if (!data || !datalen || !result || !resultlen)
+    return gpg_error (GPG_ERR_INV_VALUE);
+  *result = NULL;
+  *resultlen = 0;
+
+  if (!extended_mode)
+    le = 256;  /* Ignore provided Le and use what apdu_send uses. */
+  else if (le >= 0 && le < 256)
+    le = 256;
+
+  /* Data needs to be in BER-TLV format. */
+  buf = xtrymalloc (datalen + 4);
+  if (!buf)
+    return gpg_error_from_syserror ();
+  nbuf = 0;
+  buf[nbuf++] = 0x9c;
+  if (datalen < 128)
+    buf[nbuf++] = datalen;
+  else if (datalen < 256)
+    {
+      buf[nbuf++] = 0x81;
+      buf[nbuf++] = datalen;
+    }
+  else
+    {
+      buf[nbuf++] = 0x82;
+      buf[nbuf++] = datalen << 8;
+      buf[nbuf++] = datalen;
+    }
+  memcpy (buf+nbuf, data, datalen);
+  sw = apdu_send_le (slot, extended_mode,
+                     0x00, CMD_PSO, 0x80, 0xa6,
+                     datalen+nbuf, (const char *)buf, le,
+                     result, resultlen);
+  xfree (buf);
   if (sw != SW_SUCCESS)
     {
       /* Make sure that pending buffers are released. */

@@ -355,11 +355,17 @@ numbers 1-9 or "T" for 10 and above to indicate trust signature levels
 Locate the keys given as arguments.  This command basically uses the
 same algorithm as used when locating keys for encryption and may thus
 be used to see what keys @command{@gpgname} might use.  In particular
-external methods as defined by @option{--auto-key-locate} may be used
-to locate a key.  Only public keys are listed.  The variant
-@option{--locate-external-keys} does not consider a locally existing
-key and can thus be used to force the refresh of a key via the defined
-external methods.
+external methods as defined by @option{--auto-key-locate} are used to
+locate a key if the arguments comain valid mail addresses.  Only
+public keys are listed.
+
+The variant @option{--locate-external-keys} does not consider a
+locally existing key and can thus be used to force the refresh of a
+key via the defined external methods.  If a fingerprint is given and
+and the methods defined by --auto-key-locate define LDAP servers, the
+key is fetched from these resources; defined non-LDAP keyservers are
+skipped.
+
 
 @item --show-keys
 @opindex show-keys
@@ -695,7 +701,7 @@ used for no expiration date.
 If this command is used with @option{--batch},
 @option{--pinentry-mode} has been set to @code{loopback}, and one of
 the passphrase options (@option{--passphrase},
-@option{--passphrase-fd}, or @option{passphrase-file}) is used, the
+@option{--passphrase-fd}, or @option{--passphrase-file}) is used, the
 supplied passphrase is used for the new key and the agent does not ask
 for it.  To create a key without any protection @code{--passphrase ''}
 may be used.
@@ -1696,13 +1702,13 @@ claim" signatures are always accepted.
 
 @item --trusted-key @var{long key ID or fingerprint}
 @opindex trusted-key
-Assume that the specified key (which must be given
-as a full 8 byte key ID, a 20 byte, or 32 byte fingerprint)
-is as trustworthy as one of
-your own secret keys. This option is useful if you
-don't want to keep your secret keys (or one of them)
+Assume that the specified key (which should be given as fingerprint)
+is as trustworthy as one of your own secret keys. This option is
+useful if you don't want to keep your secret keys (or one of them)
 online but still want to be able to check the validity of a given
-recipient's or signator's key.
+recipient's or signator's key.  If the given key is not locally
+available but an LDAP keyserver is configured the missing key is
+imported from that server.
 
 @item --trust-model @{pgp|classic|tofu|tofu+pgp|direct|always|auto@}
 @opindex trust-model
@@ -1842,14 +1848,20 @@ list.  The default is "local,wkd".
   PGP Universal method of checking @samp{ldap://keys.(thedomain)}.
 
   @item ntds
-  Locate the key using the Active Directory (Windows only).
+  Locate the key using the Active Directory (Windows only).  This
+  method also allows to search by fingerprint using the command
+  @option{--locate-external-key}.
 
   @item keyserver
-  Locate a key using a keyserver.
+  Locate a key using a keyserver.  This method also allows to search
+  by fingerprint using the command @option{--locate-external-key} if
+  any of the configured keyservers is an LDAP server.
 
   @item keyserver-URL
   In addition, a keyserver URL as used in the @command{dirmngr}
   configuration may be used here to query that particular keyserver.
+  This method also allows to search by fingerprint using the command
+  @option{--locate-external-key} if the URL specifies an LDAP server.
 
   @item local
   Locate the key using the local keyrings.  This mechanism allows the user to
@@ -2010,7 +2022,9 @@ are available for all keyserver types, some common options are:
 @end table
 
 The default list of options is: "self-sigs-only, import-clean,
-repair-keys, repair-pks-subkey-bug, export-attributes".
+repair-keys, repair-pks-subkey-bug, export-attributes". However, if
+the actual used source is an LDAP server "no-self-sigs-only" is
+assumed unless "self-sigs-only" has been explictly configured.
 
 
 @item --completes-needed @var{n}
@@ -2474,7 +2488,8 @@ opposite meaning. The options are:
   signatures.  Defaults to yes.
 
   @item bulk-import
-  When used with --use-keyboxd do the import within a single
+  When used the keyboxd (option "use-keyboxd" in @file{common.conf})
+  do the import within a single
   transaction.  This is an experimental feature.
 
   @item import-minimal
@@ -3587,6 +3602,12 @@ You need to consult the source code to learn the details.  Note that
 the advanced key generation commands can always be used to specify a
 key algorithm directly.
 
+@item --no-auto-trust-new-key
+@opindex no-auto-trust-new-key
+When creating a new key the ownertrust of the new key is set to
+ultimate.  This option disables this and the user needs to manually
+assign an ownertrust value.
+
 @item --force-sign-key
 @opindex force-sign-key
 This option modifies the behaviour of the commands
@@ -3744,6 +3765,12 @@ current home directory (@pxref{option --homedir}).
   may not be entered and the option may not be abbreviated.  This default
   name may be changed on the command line (@pxref{gpg-option --options}).
   You should backup this file.
+
+  @item common.conf
+  @efindex common.conf
+  This is an optional configuration file read by @command{@gpgname} on
+  startup.  It may contain options pertaining to all components of
+  GnuPG.  Its current main use is for the "use-keyboxd" option.
 
 @end table
 

@@ -27,7 +27,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <assert.h>
 #include <signal.h>
 #ifdef USE_NPTH
 # include <unistd.h>
@@ -230,6 +229,7 @@ static npth_mutex_t reader_table_lock;
 #define PCSC_E_READER_UNAVAILABLE      0x80100017
 #define PCSC_E_NO_SERVICE              0x8010001D
 #define PCSC_E_SERVICE_STOPPED         0x8010001E
+#define PCSC_E_NO_READERS_AVAILABLE    0x8010002E
 #define PCSC_W_RESET_CARD              0x80100068
 #define PCSC_W_REMOVED_CARD            0x80100069
 
@@ -302,6 +302,7 @@ long (* DLSTDCALL pcsc_establish_context) (pcsc_dword_t scope,
                                            const void *reserved2,
                                            HANDLE *r_context);
 long (* DLSTDCALL pcsc_release_context) (HANDLE context);
+long (* DLSTDCALL pcsc_cancel) (HANDLE context);
 long (* DLSTDCALL pcsc_list_readers) (HANDLE context,
                                       const char *groups,
                                       char *readers, pcsc_dword_t*readerslen);
@@ -327,10 +328,10 @@ long (* DLSTDCALL pcsc_status) (HANDLE card,
                                 pcsc_dword_t *r_state,
                                 pcsc_dword_t *r_protocol,
                                 unsigned char *atr, pcsc_dword_t *atrlen);
-long (* DLSTDCALL pcsc_begin_transaction) (long card);
+long (* DLSTDCALL pcsc_begin_transaction) (HANDLE card);
 long (* DLSTDCALL pcsc_end_transaction) (HANDLE card,
                                          pcsc_dword_t disposition);
-long (* DLSTDCALL pcsc_transmit) (long card,
+long (* DLSTDCALL pcsc_transmit) (HANDLE card,
                                   const pcsc_io_request_t send_pci,
                                   const unsigned char *send_buffer,
                                   pcsc_dword_t send_len,
@@ -625,6 +626,7 @@ pcsc_error_string (long err)
     case 0x001c: s = "card unsupported"; break;
     case 0x001d: s = "no service"; break;
     case 0x001e: s = "service stopped"; break;
+    case 0x002e: s = "no readers available"; break;
     default:     s = "unknown PC/SC error code"; break;
     }
   return s;
@@ -646,6 +648,7 @@ pcsc_error_to_sw (long ec)
     case PCSC_E_NO_SERVICE:
     case PCSC_E_SERVICE_STOPPED:
     case PCSC_E_UNKNOWN_READER:      rc = SW_HOST_NO_READER; break;
+    case PCSC_E_NO_READERS_AVAILABLE:rc = SW_HOST_NO_READER; break;
     case PCSC_E_SHARING_VIOLATION:   rc = SW_HOST_LOCKING_FAILED; break;
     case PCSC_E_NO_SMARTCARD:        rc = SW_HOST_NO_CARD; break;
     case PCSC_W_REMOVED_CARD:        rc = SW_HOST_NO_CARD; break;
@@ -823,20 +826,23 @@ control_pcsc (int slot, pcsc_dword_t ioctl_code,
 }
 
 
+static void
+release_pcsc_context (void)
+{
+  /*log_debug ("%s: releasing context\n", __func__);*/
+  log_assert (pcsc.context != 0);
+  pcsc_release_context (pcsc.context);
+  pcsc.context = 0;
+}
+
 static int
 close_pcsc_reader (int slot)
 {
+  /*log_debug ("%s: count=%d (ctx=%x)\n", __func__, pcsc.count, pcsc.context);*/
   (void)slot;
-  if (--pcsc.count == 0 && npth_mutex_trylock (&reader_table_lock) == 0)
-    {
-      int i;
-
-      pcsc_release_context (pcsc.context);
-      pcsc.context = 0;
-      for (i = 0; i < MAX_READER; i++)
-        pcsc.rdrname[i] = NULL;
-      npth_mutex_unlock (&reader_table_lock);
-    }
+  log_assert (pcsc.count > 0);
+  if (!--pcsc.count)
+    release_pcsc_context ();
   return 0;
 }
 
@@ -847,7 +853,7 @@ connect_pcsc_card (int slot)
 {
   long err;
 
-  assert (slot >= 0 && slot < MAX_READER);
+  log_assert (slot >= 0 && slot < MAX_READER);
 
   if (reader_table[slot].pcsc.card)
     return SW_HOST_ALREADY_CONNECTED;
@@ -867,6 +873,15 @@ connect_pcsc_card (int slot)
       if (err != PCSC_E_NO_SMARTCARD)
         log_error ("pcsc_connect failed: %s (0x%lx)\n",
                    pcsc_error_string (err), err);
+      if (err == PCSC_W_REMOVED_CARD && pcsc_cancel)
+        {
+          long err2;
+          if ((err2=pcsc_cancel (pcsc.context)))
+            log_error ("pcsc_cancel failed: %s (0x%lx)\n",
+                       pcsc_error_string (err2), err2);
+          else if (opt.verbose)
+            log_error ("pcsc_cancel succeeded\n");
+        }
     }
   else
     {
@@ -904,7 +919,7 @@ disconnect_pcsc_card (int slot)
 {
   long err;
 
-  assert (slot >= 0 && slot < MAX_READER);
+  log_assert (slot >= 0 && slot < MAX_READER);
 
   if (!reader_table[slot].pcsc.card)
     return 0;
@@ -1130,6 +1145,7 @@ pcsc_init (void)
 
       pcsc_establish_context = dlsym (handle, "SCardEstablishContext");
       pcsc_release_context   = dlsym (handle, "SCardReleaseContext");
+      pcsc_cancel            = dlsym (handle, "SCardCancel");
       pcsc_list_readers      = dlsym (handle, "SCardListReaders");
 #if defined(_WIN32) || defined(__CYGWIN__)
       if (!pcsc_list_readers)
@@ -1222,11 +1238,12 @@ open_pcsc_reader (const char *rdrname)
   if (slot == -1)
     return -1;
 
+  pcsc.count++;
   reader_table[slot].rdrname = xtrystrdup (rdrname);
   if (!reader_table[slot].rdrname)
     {
       log_error ("error allocating memory for reader name\n");
-      close_pcsc_reader (0);
+      close_pcsc_reader (slot);
       reader_table[slot].used = 0;
       unlock_slot (slot);
       return -1;
@@ -1243,7 +1260,6 @@ open_pcsc_reader (const char *rdrname)
   reader_table[slot].send_apdu_reader = pcsc_send_apdu;
   reader_table[slot].dump_status_reader = dump_pcsc_reader_status;
 
-  pcsc.count++;
   dump_reader_status (slot);
   unlock_slot (slot);
   return slot;
@@ -1476,7 +1492,7 @@ reset_ccid_reader (int slot)
   if (err)
     return err;
   /* If the reset was successful, update the ATR. */
-  assert (sizeof slotp->atr >= sizeof atr);
+  log_assert (sizeof slotp->atr >= sizeof atr);
   slotp->atrlen = atrlen;
   memcpy (slotp->atr, atr, atrlen);
   dump_reader_status (slot);
@@ -1976,15 +1992,13 @@ apdu_dev_list_start (const char *portstr, struct dev_list **l_p)
   dl->idx = 0;
   dl->idx_max = 0;
 
-  npth_mutex_lock (&reader_table_lock);
-
 #ifdef HAVE_LIBUSB
   if (!opt.disable_ccid)
     {
       err = ccid_dev_scan (&dl->idx_max, &dl->table);
       if (err)
         {
-          npth_mutex_unlock (&reader_table_lock);
+          xfree (dl);
           return err;
         }
 
@@ -1994,7 +2008,6 @@ apdu_dev_list_start (const char *portstr, struct dev_list **l_p)
             log_debug ("leave: apdu_open_reader => slot=-1 (no ccid)\n");
 
           xfree (dl);
-          npth_mutex_unlock (&reader_table_lock);
           return gpg_error (GPG_ERR_ENODEV);
         }
     }
@@ -2006,11 +2019,14 @@ apdu_dev_list_start (const char *portstr, struct dev_list **l_p)
       char *p = NULL;
 
       if (!pcsc.context)
-        if (pcsc_init () < 0)
-          {
-            npth_mutex_unlock (&reader_table_lock);
-            return gpg_error (GPG_ERR_NO_SERVICE);
-          }
+        {
+          /* log_debug ("%s: No context - calling init\n", __func__); */
+          if (pcsc_init () < 0)
+            {
+              xfree (dl);
+              return gpg_error (GPG_ERR_NO_SERVICE);
+            }
+        }
 
       r = pcsc_list_readers (pcsc.context, NULL, NULL, &nreader);
       if (!r)
@@ -2021,8 +2037,9 @@ apdu_dev_list_start (const char *portstr, struct dev_list **l_p)
               err = gpg_error_from_syserror ();
 
               log_error ("error allocating memory for reader list\n");
-              close_pcsc_reader (0);
-              npth_mutex_unlock (&reader_table_lock);
+              if (pcsc.count == 0)
+                release_pcsc_context ();
+              xfree (dl);
               return err;
             }
           r = pcsc_list_readers (pcsc.context, NULL, p, &nreader);
@@ -2032,9 +2049,10 @@ apdu_dev_list_start (const char *portstr, struct dev_list **l_p)
           log_error ("pcsc_list_readers failed: %s (0x%lx)\n",
                      pcsc_error_string (r), r);
           xfree (p);
-          close_pcsc_reader (0);
-          npth_mutex_unlock (&reader_table_lock);
-          return gpg_error (GPG_ERR_NO_SERVICE);
+          if (pcsc.count == 0)
+            release_pcsc_context ();
+          xfree (dl);
+          return iso7816_map_sw (pcsc_error_to_sw (r));
         }
 
       dl->table = p;
@@ -2093,14 +2111,12 @@ apdu_dev_list_finish (struct dev_list *dl)
       for (i = 0; i < MAX_READER; i++)
         pcsc.rdrname[i] = NULL;
 
+      npth_mutex_lock (&reader_table_lock);
       if (pcsc.count == 0)
-        {
-          pcsc_release_context (pcsc.context);
-          pcsc.context = 0;
-        }
+        release_pcsc_context ();
+      npth_mutex_unlock (&reader_table_lock);
     }
   xfree (dl);
-  npth_mutex_unlock (&reader_table_lock);
 }
 
 
@@ -2113,22 +2129,42 @@ apdu_open_reader (struct dev_list *dl)
   if (!dl->table)
     return -1;
 
+#ifdef HAVE_LIBUSB
   /* See whether we want to use the reader ID string or a reader
      number. A readerno of -1 indicates that the reader ID string is
      to be used. */
-  if (dl->portstr && strchr (dl->portstr, ':'))
-    readerno = -1; /* We want to use the readerid.  */
-  else if (dl->portstr)
+  if (dl->portstr)
     {
-      readerno = atoi (dl->portstr);
-      if (readerno < 0 || readerno >= dl->idx_max)
-        return -1;
+      if (!opt.disable_ccid || strchr (dl->portstr, ':'))
+        readerno = -1; /* We want to use the readerid.  */
+      else
+        {
+          readerno = atoi (dl->portstr);
+          if (readerno < 0 || readerno >= dl->idx_max)
+            return -1;
 
-      dl->idx = readerno;
-      dl->portstr = NULL;
+          npth_mutex_lock (&reader_table_lock);
+          /* If already opened HANDLE, return -1.  */
+          for (slot = 0; slot < MAX_READER; slot++)
+            if (reader_table[slot].used)
+              {
+                npth_mutex_unlock (&reader_table_lock);
+                return -1;
+              }
+          npth_mutex_unlock (&reader_table_lock);
+
+          dl->idx = readerno;
+          dl->portstr = NULL;
+        }
     }
   else
     readerno = 0;  /* Default. */
+#else
+  if (dl->portstr)
+    readerno = -1; /* We want to use the readerid.  */
+  else
+    readerno = 0;  /* Default. */
+#endif
 
 #ifdef HAVE_LIBUSB
   if (!opt.disable_ccid)
@@ -2143,6 +2179,7 @@ apdu_open_reader (struct dev_list *dl)
           return slot;
         }
 
+      npth_mutex_lock (&reader_table_lock);
       while (dl->idx < dl->idx_max)
         {
           unsigned int bai = ccid_get_BAI (dl->idx, dl->table);
@@ -2166,7 +2203,10 @@ apdu_open_reader (struct dev_list *dl)
 
               dl->idx++;
               if (slot >= 0)
-                return slot;
+                {
+                  npth_mutex_unlock (&reader_table_lock);
+                  return slot;
+                }
               else
                 {
                   /* Skip this reader.  */
@@ -2182,6 +2222,7 @@ apdu_open_reader (struct dev_list *dl)
           else
             dl->idx++;
         }
+      npth_mutex_unlock (&reader_table_lock);
 
       /* Not found.  */
       slot = -1;
@@ -2197,6 +2238,7 @@ apdu_open_reader (struct dev_list *dl)
           return slot;
         }
 
+      npth_mutex_lock (&reader_table_lock);
       while (dl->idx < dl->idx_max)
         {
           const char *rdrname = pcsc.rdrname[dl->idx];
@@ -2216,14 +2258,18 @@ apdu_open_reader (struct dev_list *dl)
                 log_debug ("apdu_open_reader: new device=%s\n", rdrname);
 
               /* When reader string is specified, check if it is the one.  */
-              if (readerno < 0 && strcmp (rdrname, dl->portstr) != 0)
+              if (readerno < 0
+                  && strncmp (rdrname, dl->portstr, strlen (dl->portstr)) != 0)
                 continue;
 
               slot = open_pcsc_reader (rdrname);
 
               dl->idx++;
               if (slot >= 0)
-                return slot;
+                {
+                  npth_mutex_unlock (&reader_table_lock);
+                  return slot;
+                }
               else
                 {
                   /* Skip this reader.  */
@@ -2235,6 +2281,7 @@ apdu_open_reader (struct dev_list *dl)
             dl->idx++;
         }
 
+      npth_mutex_unlock (&reader_table_lock);
       /* Not found.  */
       slot = -1;
     }
@@ -2314,15 +2361,21 @@ apdu_close_reader (int slot)
     }
   if (reader_table[slot].close_reader)
     {
+      npth_mutex_lock (&reader_table_lock);
       sw = reader_table[slot].close_reader (slot);
+      xfree (reader_table[slot].rdrname);
+      reader_table[slot].rdrname = NULL;
       reader_table[slot].used = 0;
+      npth_mutex_unlock (&reader_table_lock);
       if (DBG_READER)
         log_debug ("leave: apdu_close_reader => 0x%x (close_reader)\n", sw);
       return sw;
     }
+  npth_mutex_lock (&reader_table_lock);
   xfree (reader_table[slot].rdrname);
   reader_table[slot].rdrname = NULL;
   reader_table[slot].used = 0;
+  npth_mutex_unlock (&reader_table_lock);
   if (DBG_READER)
     log_debug ("leave: apdu_close_reader => SW_HOST_NOT_SUPPORTED\n");
   return SW_HOST_NOT_SUPPORTED;
@@ -2916,7 +2969,7 @@ send_le (int slot, int class, int ins, int p0, int p1,
           if (use_chaining && lc > 255)
             {
               apdu[apdulen] |= 0x10;
-              assert (use_chaining < 256);
+              log_assert (use_chaining < 256);
               lc_chunk = use_chaining;
               lc -= use_chaining;
             }
@@ -2946,7 +2999,7 @@ send_le (int slot, int class, int ins, int p0, int p1,
 
     exact_length_hack:
       /* As a safeguard don't pass any garbage to the driver.  */
-      assert (apdulen <= apdu_buffer_size);
+      log_assert (apdulen <= apdu_buffer_size);
       memset (apdu+apdulen, 0, apdu_buffer_size - apdulen);
       resultlen = result_buffer_size;
       rc = send_apdu (slot, apdu, apdulen, result, &resultlen, pininfo);
@@ -3022,7 +3075,7 @@ send_le (int slot, int class, int ins, int p0, int p1,
               xfree (result_buffer);
               return SW_HOST_OUT_OF_CORE;
             }
-          assert (resultlen < bufsize);
+          log_assert (resultlen < bufsize);
           memcpy (p, result, resultlen);
           p += resultlen;
         }
@@ -3042,7 +3095,7 @@ send_le (int slot, int class, int ins, int p0, int p1,
           apdu[apdulen++] = 0;
           apdu[apdulen++] = 0;
           apdu[apdulen++] = len;
-          assert (apdulen <= apdu_buffer_size);
+          log_assert (apdulen <= apdu_buffer_size);
           memset (apdu+apdulen, 0, apdu_buffer_size - apdulen);
           resultlen = result_buffer_size;
           rc = send_apdu (slot, apdu, apdulen, result, &resultlen, NULL);
@@ -3302,7 +3355,7 @@ apdu_send_direct (int slot, size_t extended_length,
               xfree (result_buffer);
               return SW_HOST_OUT_OF_CORE;
             }
-          assert (resultlen < bufsize);
+          log_assert (resultlen < bufsize);
           memcpy (p, result, resultlen);
           p += resultlen;
         }

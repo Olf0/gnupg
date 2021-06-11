@@ -58,6 +58,7 @@
 #include "../common/init.h"
 #include "../common/gc-opt-flags.h"
 #include "../common/exechelp.h"
+#include "../common/comopt.h"
 #include "frontend.h"
 
 
@@ -86,7 +87,6 @@ enum cmd_and_opt_values
     oLogFile,
     oServer,
     oDaemon,
-    oBatch,
     oFakedSystemTime,
     oListenBacklog,
     oDisableCheckOwnSocket,
@@ -99,26 +99,28 @@ static gpgrt_opt_t opts[] = {
   ARGPARSE_c (aGPGConfList, "gpgconf-list", "@"),
   ARGPARSE_c (aGPGConfTest, "gpgconf-test", "@"),
 
-  ARGPARSE_group (301, N_("@Options:\n ")),
+  ARGPARSE_header (NULL, N_("Options used for startup")),
 
   ARGPARSE_s_n (oDaemon,  "daemon", N_("run in daemon mode (background)")),
   ARGPARSE_s_n (oServer,  "server", N_("run in server mode (foreground)")),
-  ARGPARSE_s_n (oVerbose, "verbose", N_("verbose")),
-  ARGPARSE_s_n (oQuiet,	  "quiet",     N_("be somewhat more quiet")),
+  ARGPARSE_s_n (oNoDetach,  "no-detach", N_("do not detach from the console")),
+  ARGPARSE_s_s (oHomedir,    "homedir",      "@"),
   ARGPARSE_conffile (oOptions, "options", N_("|FILE|read options from FILE")),
 
+  ARGPARSE_header ("Monitor", N_("Options controlling the diagnostic output")),
+
+  ARGPARSE_s_n (oVerbose, "verbose", N_("verbose")),
+  ARGPARSE_s_n (oQuiet,	  "quiet",     N_("be somewhat more quiet")),
   ARGPARSE_s_s (oDebug,	    "debug",      "@"),
   ARGPARSE_s_n (oDebugAll,  "debug-all",  "@"),
   ARGPARSE_s_i (oDebugWait, "debug-wait", "@"),
+  ARGPARSE_s_s (oLogFile,   "log-file",  N_("use a log file for the server")),
+
+  ARGPARSE_header ("Configuration",
+                   N_("Options controlling the configuration")),
 
   ARGPARSE_s_n (oDisableCheckOwnSocket, "disable-check-own-socket", "@"),
-  ARGPARSE_s_n (oNoDetach,  "no-detach", N_("do not detach from the console")),
-  ARGPARSE_s_s (oLogFile,   "log-file",  N_("use a log file for the server")),
   ARGPARSE_s_s (oFakedSystemTime, "faked-system-time", "@"),
-
-  ARGPARSE_s_n (oBatch,      "batch",        "@"),
-  ARGPARSE_s_s (oHomedir,    "homedir",      "@"),
-
   ARGPARSE_s_i (oListenBacklog, "listen-backlog", "@"),
 
   ARGPARSE_end () /* End of list */
@@ -563,7 +565,6 @@ main (int argc, char **argv )
         {
         case aGPGConfList: gpgconf_list = 1; break;
         case aGPGConfTest: gpgconf_list = 2; break;
-        case oBatch: opt.batch=1; break;
         case oDebugWait: debug_wait = pargs.r.ret_int; break;
         case oNoGreeting: /* Dummy option.  */ break;
         case oNoVerbose: opt.verbose = 0; break;
@@ -609,6 +610,14 @@ main (int argc, char **argv )
 
   if (log_get_errorcount(0))
     exit (2);
+
+    /* Get a default log file from common.conf.  */
+  if (!logfile && !parse_comopt (GNUPG_MODULE_NAME_KEYBOXD, debug_argparser))
+    {
+      logfile = comopt.logfile;
+      comopt.logfile = NULL;
+    }
+
 
   finalize_rereadable_options ();
 
@@ -988,9 +997,10 @@ reread_configuration (void)
   gpgrt_argparse_t pargs;
   char *twopart;
   int dummy;
+  int logfile_seen = 0;
 
   if (!config_filename)
-    return; /* No config file. */
+    goto finish; /* No config file. */
 
   twopart = strconcat ("keyboxd" EXTSEP_S "conf" PATHSEP_S,
                        config_filename, NULL);
@@ -1015,12 +1025,29 @@ reread_configuration (void)
       else if (pargs.r_opt < -1)
         pargs.err = ARGPARSE_PRINT_WARNING;
       else /* Try to parse this option - ignore unchangeable ones. */
-        parse_rereadable_options (&pargs, 1);
+        {
+          if (pargs.r_opt == oLogFile)
+            logfile_seen = 1;
+          parse_rereadable_options (&pargs, 1);
+        }
     }
   gpgrt_argparse (NULL, &pargs, NULL);  /* Release internal state.  */
   xfree (twopart);
   finalize_rereadable_options ();
   set_debug ();
+
+ finish:
+  /* Get a default log file from common.conf.  */
+  if (!logfile_seen && !parse_comopt (GNUPG_MODULE_NAME_KEYBOXD, !!opt.debug))
+    {
+      if (!current_logfile || !comopt.logfile
+          || strcmp (current_logfile, comopt.logfile))
+        {
+          log_set_file (comopt.logfile);
+          xfree (current_logfile);
+          current_logfile = comopt.logfile? xtrystrdup (comopt.logfile) : NULL;
+        }
+    }
 }
 
 
@@ -1768,7 +1795,10 @@ check_own_socket (void)
 
   err = npth_attr_init (&tattr);
   if (err)
-    return;
+    {
+      xfree (sockname);
+      return;
+    }
   npth_attr_setdetachstate (&tattr, NPTH_CREATE_DETACHED);
   err = npth_create (&thread, &tattr, check_own_socket_thread, sockname);
   if (err)

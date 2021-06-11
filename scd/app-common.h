@@ -45,6 +45,7 @@
 /* Flags used by the app_write_learn_status.  */
 #define APP_LEARN_FLAG_KEYPAIRINFO  1 /* Return only keypair infos.  */
 #define APP_LEARN_FLAG_MULTI        2 /* Return info for all apps.  */
+#define APP_LEARN_FLAG_REREAD       4 /* Re-read infos from the token.  */
 
 
 /* List of supported card types.  Generic is the usual ISO7817-4
@@ -135,6 +136,7 @@ struct app_ctx_s {
   unsigned int force_chv1:1;   /* True if the card does not cache CHV1. */
   unsigned int did_chv2:1;
   unsigned int did_chv3:1;
+  unsigned int need_reset:1;   /* Do't allow any functions but deinit.  */
   struct app_local_s *app_local;  /* Local to the application. */
   struct {
     void (*deinit) (app_t app);

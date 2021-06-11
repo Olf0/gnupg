@@ -221,6 +221,17 @@ List certificates matching @var{pattern} using an external server.
 This utilizes the @code{dirmngr} service.  It uses a format useful
 mainly for debugging.
 
+@item --show-certs [@var{files}]
+@opindex show-certs
+This command takes certificate files as input and prints information
+about them in the same format as @option{--dump-cert} does.  Each file
+may either contain a single binary certificate or several PEM encoded
+certificates.  If no files are given, the input is taken from stdin.
+
+Please note that the listing format may be changed in future releases
+and that the option @option{--with-colons} has currently no effect.
+
+
 @item --keydb-clear-some-cert-flags
 @opindex keydb-clear-some-cert-flags
 This is a debugging aid to reset certain flags in the key database
@@ -853,6 +864,11 @@ may not be entered and the option may not be abbreviated.  This default
 name may be changed on the command line (@pxref{gpgsm-option --options}).
 You should backup this file.
 
+@item common.conf
+@efindex common.conf
+This is an optional configuration file read by @command{gpgsm} on
+startup.  It may contain options pertaining to all components of
+GnuPG.  Its current main use is for the "use-keyboxd" option.
 
 @item policies.txt
 @efindex policies.txt

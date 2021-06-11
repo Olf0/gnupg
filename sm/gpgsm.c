@@ -1,7 +1,7 @@
 /* gpgsm.c - GnuPG for S/MIME
  * Copyright (C) 2001-2020 Free Software Foundation, Inc.
  * Copyright (C) 2001-2019 Werner Koch
- * Copyright (C) 2015-2020 g10 Code GmbH
+ * Copyright (C) 2015-2021 g10 Code GmbH
  *
  * This file is part of GnuPG.
  *
@@ -47,6 +47,7 @@
 #include "../common/asshelp.h"
 #include "../common/init.h"
 #include "../common/compliance.h"
+#include "../common/comopt.h"
 #include "minip12.h"
 
 #ifndef O_BINARY
@@ -95,6 +96,7 @@ enum cmd_and_opt_values {
   aDumpChain,
   aDumpSecretKeys,
   aDumpExternalKeys,
+  aShowCerts,
   aKeydbClearSomeCertFlags,
   aFingerprint,
 
@@ -251,6 +253,7 @@ static gpgrt_opt_t opts[] = {
   ARGPARSE_c (aGPGConfList, "gpgconf-list", "@"),
   ARGPARSE_c (aGPGConfTest, "gpgconf-test", "@"),
 
+  ARGPARSE_c (aShowCerts, "show-certs", "@"),
   ARGPARSE_c (aDumpKeys, "dump-cert", "@"),
   ARGPARSE_c (aDumpKeys, "dump-keys", "@"),
   ARGPARSE_c (aDumpChain, "dump-chain", "@"),
@@ -1210,6 +1213,7 @@ main ( int argc, char **argv)
         case aExportSecretKeyP12:
         case aExportSecretKeyP8:
         case aExportSecretKeyRaw:
+        case aShowCerts:
         case aDumpKeys:
         case aDumpChain:
         case aDumpExternalKeys:
@@ -1611,6 +1615,28 @@ main ( int argc, char **argv)
       gpgsm_status_with_error (&ctrl, STATUS_FAILURE,
                                "option-parser", gpg_error (GPG_ERR_GENERAL));
       gpgsm_exit(2);
+    }
+
+  /* Process common component options.  */
+  if (parse_comopt (GNUPG_MODULE_NAME_GPGSM, debug_argparser))
+    {
+      gpgsm_status_with_error (&ctrl, STATUS_FAILURE,
+                               "option-parser", gpg_error (GPG_ERR_GENERAL));
+      gpgsm_exit(2);
+    }
+
+  if (opt.use_keyboxd)
+    log_info ("Note: Please move option \"%s\" to \"common.conf\"\n",
+              "use-keyboxd");
+  opt.use_keyboxd = comopt.use_keyboxd;  /* Override.  */
+
+  if (opt.keyboxd_program)
+    log_info ("Note: Please move option \"%s\" to \"common.conf\"\n",
+              "keyboxd-program");
+  if (!opt.keyboxd_program && comopt.keyboxd_program)
+    {
+      opt.keyboxd_program = comopt.keyboxd_program;
+      comopt.keyboxd_program = NULL;
     }
 
   if (pwfd != -1)	/* Read the passphrase now.  */
@@ -2039,13 +2065,16 @@ main ( int argc, char **argv)
 
         set_binary (stdin);
         if (!argc)
-          gpgsm_decrypt (&ctrl, 0, fp); /* from stdin */
+          err = gpgsm_decrypt (&ctrl, 0, fp); /* from stdin */
         else if (argc == 1)
-          gpgsm_decrypt (&ctrl, open_read (*argv), fp); /* from file */
+          err = gpgsm_decrypt (&ctrl, open_read (*argv), fp); /* from file */
         else
           wrong_args ("--decrypt [filename]");
 
-        es_fclose (fp);
+        if (err)
+          gpgrt_fcancel (fp);
+        else
+          es_fclose (fp);
       }
       break;
 
@@ -2091,6 +2120,15 @@ main ( int argc, char **argv)
       }
       break;
 
+    case aShowCerts:
+      {
+        estream_t fp;
+
+        fp = open_es_fwrite (opt.outfile?opt.outfile:"-");
+        gpgsm_show_certs (&ctrl, argc, argv, fp);
+        es_fclose (fp);
+      }
+      break;
 
     case aKeygen: /* Generate a key; well kind of. */
       {

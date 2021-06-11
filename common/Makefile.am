@@ -97,6 +97,8 @@ common_sources = \
 	name-value.c name-value.h \
 	recsel.c recsel.h \
 	ksba-io-support.c ksba-io-support.h \
+	openpgp-fpr.c \
+	comopt.c comopt.h \
 	compliance.c compliance.h \
 	pkscreening.c pkscreening.h
 

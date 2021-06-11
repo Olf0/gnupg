@@ -459,7 +459,8 @@ reimport_one (ctrl_t ctrl, struct stats_s *stats, int in_fd)
       err = keydb_get_cert (kh, &cert);
       if (err)
         {
-          log_error ("keydb_get_cert() failed: %s\n", gpg_strerror (err));
+          log_error ("keydb_get_cert failed in %s: %s <%s>\n",
+                     __func__, gpg_strerror (err), gpg_strsource (err));
           print_import_problem (ctrl, NULL, 1);
           stats->not_imported++;
           continue;
@@ -771,7 +772,7 @@ parse_p12 (ctrl_t ctrl, ksba_reader_t reader, struct stats_s *stats)
 
   err = gpgsm_agent_ask_passphrase
     (ctrl,
-     i18n_utf8 ("Please enter the passphrase to unprotect the PKCS#12 object."),
+     i18n_utf8 (N_("Please enter the passphrase to unprotect the PKCS#12 object.")),
      0, &passphrase);
   if (err)
     goto leave;

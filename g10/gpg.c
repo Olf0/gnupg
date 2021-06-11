@@ -1,7 +1,7 @@
 /* gpg.c - The GnuPG OpenPGP tool
  * Copyright (C) 1998-2020 Free Software Foundation, Inc.
  * Copyright (C) 1997-2019 Werner Koch
- * Copyright (C) 2015-2020 g10 Code GmbH
+ * Copyright (C) 2015-2021 g10 Code GmbH
  *
  * This file is part of GnuPG.
  *
@@ -66,6 +66,7 @@
 #include "../common/mbox-util.h"
 #include "../common/shareddefs.h"
 #include "../common/compliance.h"
+#include "../common/comopt.h"
 
 #if defined(HAVE_DOSISH_SYSTEM) || defined(__CYGWIN__)
 #define MY_O_BINARY  O_BINARY
@@ -285,6 +286,7 @@ enum cmd_and_opt_values
     oAlwaysTrust,
     oTrustModel,
     oForceOwnertrust,
+    oNoAutoTrustNewKey,
     oSetFilename,
     oForYourEyesOnly,
     oNoForYourEyesOnly,
@@ -692,6 +694,7 @@ static gpgrt_opt_t opts[] = {
   ARGPARSE_s_n (oAutoCheckTrustDB, "auto-check-trustdb", "@"),
   ARGPARSE_s_n (oNoAutoCheckTrustDB, "no-auto-check-trustdb", "@"),
   ARGPARSE_s_s (oForceOwnertrust, "force-ownertrust", "@"),
+  ARGPARSE_s_n (oNoAutoTrustNewKey, "no-auto-trust-new-key", "@"),
 #endif
 
 
@@ -1598,6 +1601,7 @@ check_permissions (const char *path, int item)
   if (gnupg_stat (dir,&dirbuf) || !S_ISDIR (dirbuf.st_mode))
     {
       /* Weird error */
+      xfree(dir);
       ret=1;
       goto end;
     }
@@ -1951,6 +1955,16 @@ gpgconf_list (void)
      the top of keygen.c  */
   es_printf ("default_pubkey_algo:%lu:\"%s:\n", GC_OPT_FLAG_DEFAULT,
              get_default_pubkey_algo ());
+  /* This info only mode tells whether the we are running in de-vs
+   * compliance mode.  This does not test all parameters but the basic
+   * conditions like a proper RNG and Libgcrypt.  AS of now we always
+   * return 0 because this version of gnupg has not yet received an
+   * appoval. */
+  es_printf ("compliance_de_vs:%lu:%d:\n", GC_OPT_FLAG_DEFAULT,
+             0 /*gnupg_rng_is_compliant (CO_DE_VS)*/);
+
+  es_printf ("use_keyboxd:%lu:%d:\n", GC_OPT_FLAG_DEFAULT, opt.use_keyboxd);
+
 }
 
 
@@ -2301,6 +2315,8 @@ gpg_deinit_default_ctrl (ctrl_t ctrl)
 
   keydb_release (ctrl->cached_getkey_kdb);
   gpg_keyboxd_deinit_session_data (ctrl);
+  xfree (ctrl->secret_keygrips);
+  ctrl->secret_keygrips = NULL;
 }
 
 
@@ -2968,6 +2984,8 @@ main (int argc, char **argv)
 		opt.force_ownertrust=0;
 	      }
 	    break;
+
+          case oNoAutoTrustNewKey: opt.flags.no_auto_trust_new_key = 1; break;
 
           case oCompliance:
 	    {
@@ -3701,6 +3719,28 @@ main (int argc, char **argv)
         g10_exit(2);
       }
 
+    /* Process common component options.  */
+    if (parse_comopt (GNUPG_MODULE_NAME_GPG, debug_argparser))
+      {
+        write_status_failure ("option-parser", gpg_error(GPG_ERR_GENERAL));
+        g10_exit(2);
+      }
+
+    if (opt.use_keyboxd)
+      log_info ("Note: Please move option \"%s\" to \"common.conf\"\n",
+                "use-keyboxd");
+    opt.use_keyboxd = comopt.use_keyboxd;  /* Override.  */
+
+    if (opt.keyboxd_program)
+      log_info ("Note: Please move option \"%s\" to \"common.conf\"\n",
+                "keyboxd-program");
+    if (!opt.keyboxd_program && comopt.keyboxd_program)
+      {
+        opt.keyboxd_program = comopt.keyboxd_program;
+        comopt.keyboxd_program = NULL;
+      }
+
+
     /* The command --gpgconf-list is pretty simple and may be called
        directly after the option parsing. */
     if (cmd == aGPGConfList)
@@ -3902,7 +3942,8 @@ main (int argc, char **argv)
       log_error(_("invalid min-cert-level; must be 1, 2, or 3\n"));
     switch( opt.s2k_mode ) {
       case 0:
-	log_info(_("Note: simple S2K mode (0) is strongly discouraged\n"));
+        if (!opt.quiet)
+          log_info(_("Note: simple S2K mode (0) is strongly discouraged\n"));
 	break;
       case 1: case 3: break;
       default:

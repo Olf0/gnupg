@@ -237,12 +237,13 @@ print_status_key_not_created (const char *handle)
 static gpg_error_t
 write_uid (kbnode_t root, const char *s)
 {
-  PACKET *pkt = xmalloc_clear (sizeof *pkt);
+  PACKET *pkt = NULL;
   size_t n = strlen (s);
 
   if (n > MAX_UID_PACKET_LENGTH - 10)
     return gpg_error (GPG_ERR_INV_USER_ID);
 
+  pkt = xmalloc_clear (sizeof *pkt);
   pkt->pkttype = PKT_USER_ID;
   pkt->pkt.user_id = xmalloc_clear (sizeof *pkt->pkt.user_id + n);
   pkt->pkt.user_id->len = n;
@@ -2860,7 +2861,10 @@ ask_expire_interval(int object,const char *def_expire)
 	    xfree(prompt);
 
 	    if(*answer=='\0')
-	      answer=xstrdup(def_expire);
+              {
+                xfree (answer);
+	        answer = xstrdup (def_expire);
+              }
 	  }
 	cpr_kill_prompt();
 	trim_spaces(answer);
@@ -3292,12 +3296,13 @@ parse_key_parameter_part (ctrl_t ctrl,
   int ecdh_or_ecdsa = 0;
   unsigned int size;
   int keyuse;
-  int keyversion = 4;
+  int keyversion = 0;           /* Not specified.  */
   int i;
   const char *s;
   int from_card = 0;
   char *keygrip = NULL;
   u32 keytime = 0;
+  int is_448 = 0;
 
   if (!string || !*string)
     return 0; /* Success.  */
@@ -3339,6 +3344,8 @@ parse_key_parameter_part (ctrl_t ctrl,
           algo = PUBKEY_ALGO_ECDH; /* Default ECC algorithm.  */
           ecdh_or_ecdsa = 1;       /* We may need to switch the algo.  */
         }
+      if (curve && (!strcmp (curve, "X448") || !strcmp (curve, "Ed448")))
+        is_448 = 1;
     }
   else
     return gpg_error (GPG_ERR_UNKNOWN_CURVE);
@@ -3494,11 +3501,17 @@ parse_key_parameter_part (ctrl_t ctrl,
               if (!strcmp (algostr, "ed25519"))
                 algo = PUBKEY_ALGO_EDDSA;
               else if (!strcmp (algostr, "ed448"))
-                algo = PUBKEY_ALGO_EDDSA;
+                {
+                  algo = PUBKEY_ALGO_EDDSA;
+                  is_448 = 1;
+                }
               else if (!strcmp (algostr, "cv25519"))
                 algo = PUBKEY_ALGO_ECDH;
               else if (!strcmp (algostr, "cv448"))
-                algo = PUBKEY_ALGO_ECDH;
+                {
+                  algo = PUBKEY_ALGO_ECDH;
+                  is_448 = 1;
+                }
               else if ((kpi->usage & GCRY_PK_USAGE_ENCR))
                 algo = PUBKEY_ALGO_ECDH;
               else
@@ -3574,6 +3587,17 @@ parse_key_parameter_part (ctrl_t ctrl,
       xfree (keygrip);
       return gpg_error (GPG_ERR_WRONG_KEY_USAGE);
     }
+
+  /* Ed448 and X448 must only be used as v5 keys.  */
+  if (is_448)
+    {
+      if (keyversion == 4)
+        log_info (_("WARNING: v4 is specified, but overridden by v5.\n"));
+
+      keyversion = 5;
+    }
+  else if (keyversion == 0)
+    keyversion = 4;
 
   /* Return values.  */
   if (r_algo)
@@ -4931,6 +4955,14 @@ generate_keypair (ctrl_t ctrl, int full, const char *fname,
                   strcpy (r->u.value, curve);
                   r->next = para;
                   para = r;
+                  if (!strcmp (curve, "Ed448"))
+                    {
+                      r = xmalloc_clear (sizeof *r + 20);
+                      r->key = pVERSION;
+                      snprintf (r->u.value, 20, "%d", 5);
+                      r->next = para;
+                      para = r;
+                    }
                 }
               else
                 {
@@ -4975,7 +5007,14 @@ generate_keypair (ctrl_t ctrl, int full, const char *fname,
                       if (!strcmp (curve, "Ed25519"))
                         curve = "Curve25519";
                       else
-                        curve = "X448";
+                        {
+                          curve = "X448";
+                          r = xmalloc_clear (sizeof *r + 20);
+                          r->key = pSUBVERSION;
+                          snprintf (r->u.value, 20, "%d", 5);
+                          r->next = para;
+                          para = r;
+                        }
                     }
                   r = xmalloc_clear (sizeof *r + strlen (curve));
                   r->key = pSUBKEYCURVE;
@@ -4998,6 +5037,14 @@ generate_keypair (ctrl_t ctrl, int full, const char *fname,
                   strcpy (r->u.value, curve);
                   r->next = para;
                   para = r;
+                  if (!strcmp (curve, "Ed448"))
+                    {
+                      r = xmalloc_clear (sizeof *r + 20);
+                      r->key = pVERSION;
+                      snprintf (r->u.value, 20, "%d", 5);
+                      r->next = para;
+                      para = r;
+                    }
                 }
 
               r = xmalloc_clear( sizeof *r + 20 );
@@ -5218,12 +5265,15 @@ card_store_key_with_backup (ctrl_t ctrl, PKT_public_key *sub_psk,
   epoch2isotime (timestamp, (time_t)sk->timestamp);
   err = hexkeygrip_from_pk (sk, &hexgrip);
   if (err)
-    return err;
+    goto leave;
 
   memset(&info, 0, sizeof (info));
   rc = agent_scd_getattr ("SERIALNO", &info);
   if (rc)
-    return (gpg_error_t)rc;
+    {
+      err = (gpg_error_t)rc;
+      goto leave;
+    }
 
   rc = agent_keytocard (hexgrip, 2, 1, info.serialno, timestamp);
   xfree (info.serialno);
@@ -5556,6 +5606,7 @@ do_generate_keypair (ctrl_t ctrl, struct para_data_s *para,
         {
           int no_enc_rsa;
           PKT_public_key *pk;
+          char hexfpr[2*MAX_FINGERPRINT_LEN + 1];
 
           no_enc_rsa = ((get_parameter_algo (ctrl, para, pKEYTYPE, NULL)
                          == PUBKEY_ALGO_RSA)
@@ -5565,12 +5616,13 @@ do_generate_keypair (ctrl_t ctrl, struct para_data_s *para,
 
           pk = find_kbnode (pub_root, PKT_PUBLIC_KEY)->pkt->pkt.public_key;
 
-          keyid_from_pk (pk, pk->main_keyid);
-          register_trusted_keyid (pk->main_keyid);
+          hexfingerprint (pk, hexfpr, sizeof hexfpr);
+          register_trusted_key (hexfpr);
 
-	  update_ownertrust (ctrl, pk,
-                             ((get_ownertrust (ctrl, pk) & ~TRUST_MASK)
-                              | TRUST_ULTIMATE ));
+          if (!opt.flags.no_auto_trust_new_key)
+            update_ownertrust (ctrl, pk,
+                               ((get_ownertrust (ctrl, pk) & ~TRUST_MASK)
+                                | TRUST_ULTIMATE ));
 
           gen_standard_revoke (ctrl, pk, cache_nonce);
 
@@ -6111,12 +6163,20 @@ gen_card_key (int keyno, int algo, int is_primary, kbnode_t pub_root,
      the self-signatures. */
   err = agent_readkey (NULL, 1, keyid, &public);
   if (err)
-    return err;
+    {
+      xfree (pkt);
+      xfree (pk);
+      return err;
+    }
   err = gcry_sexp_sscan (&s_key, NULL, public,
                          gcry_sexp_canon_len (public, 0, NULL, NULL));
   xfree (public);
   if (err)
-    return err;
+    {
+      xfree (pkt);
+      xfree (pk);
+      return err;
+    }
 
   if (algo == PUBKEY_ALGO_RSA)
     err = key_from_sexp (pk->pkey, s_key, "public-key", "ne");

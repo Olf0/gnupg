@@ -1073,6 +1073,24 @@ pkd:0:1024:B665B1435F4C2 .... FF26ABB:
     should not contain spaces.  The error code is a either a string
     commencing with a letter or such a string prefixed with a
     numerical error code and an underscore; e.g.: "151011327_EOF".
+
+    Some of the error locations are:
+
+    - decryption.early_plaintext :: The OpenPGP message contains more
+         than one plaintext.
+    - genkey :: Problem generating a key.  The error code further
+                describes the problem.
+    - get_passphrase :: Problem getting the passphrase from the
+                        gpg-agent.
+    - keyedit.passwd :: Changing the password failed.
+    - nomdc_with_legacy_cipher :: The message was not MDC protected.
+         Use the command line to lern about a workaround.
+    - random-compliance :: The random number generator or the used
+         version of Libgcrypt do not fulfill the requirements of the
+         current compliance setting.  The error code is often
+         GPG_ERR_FORBIDDEN.
+    - set_expire :: Changing the expiration time failed.
+
 *** WARNING <location> <error code> [<text>]
     This is a generic warning status message, it might be followed by
     error location specific data. <location> and <error code> may not
@@ -1208,12 +1226,31 @@ pkd:0:1024:B665B1435F4C2 .... FF26ABB:
     info available.  The format is the usual ISO string or a number
     with the seconds since Epoch.  <algostr> is the algorithm or curve
     this key uses (e.g. "rsa2048") or a "-" if not known.
+
+*** CERTINFO <certtype> <certref> [<label>]
+
+    This status is emitted for X.509 certifcates.
+    CERTTYPE is a number indicating the type of the certificate:
+     0   := Unknown
+     100 := Regular X.509 cert
+     101 := Trusted X.509 cert
+     102 := Useful X.509 cert
+     110 := Root CA cert in a special format (e.g. DINSIG)
+     111 := Root CA cert as standard X509 cert
+
+    CERTREF identifies the certificate uniquely on the card and may be
+    used to match it with a key's KEYREF.  LABEL is an optional human
+    readable decription of the certificate; it won't have any space in
+    it and is percent encoded.
+
 *** MANUFACTURER <n> [<string>]
 
     This status returns the Manufactorer ID as the unsigned number N.
     For OpenPGP this is well defined; for other cards this is 0.  The
     name of the manufacturer is also given as <string>; spaces are not
-    escaped.  For PKCS#15 cards <string> is TokenInfo.manufactorerID.
+    escaped.  For PKCS#15 cards <string> is TokenInfo.manufactorerID;
+    a string in brackets describing GnuPG's own card product name may
+    be appended to <string>.
 
 *** KEY-STATUS <keyref> <status>
     This is the response from scdaemon on GETATTR KEY-STATUS for
@@ -1228,6 +1265,18 @@ pkd:0:1024:B665B1435F4C2 .... FF26ABB:
     OpenPGP cards.  <keyref> is the usual keyref (e.g. OPENPGP.1 or
     OPENPGP.129) and <string> is the algoritm or curve name, which
     is available for the key.
+
+*** KEY-TIME <n> <timestamp>
+    This is a response from scdaemon on GETATTR KEY-TIME.  A keyref N
+    of 1 gives the timestamp for the standard OpenPGP signing key, 2
+    for the encryption key, and 3 for an authentication key.  Note
+    that a KEYPAIRINFO status lines carries the same information and
+    should be preferred.
+
+*** KEY-LABEL <keyref> <label>
+    This returns the human readbable label for the keys given by
+    KEYREF.  LABEL won't have any space in it and is percent encoded.
+    This info shall only be used for dispaly purposes.
 
 * Format of the --attribute-fd output
 
@@ -1552,6 +1601,7 @@ Status codes are:
   1.3.6.1.4.1.11591.2.2          X.509 extensions
   1.3.6.1.4.1.11591.2.2.1          standaloneCertificate
   1.3.6.1.4.1.11591.2.2.2          wellKnownPrivateKey
+  1.3.6.1.4.1.11591.2.2.10         OpenPGP KDF/KEK parameter
   1.3.6.1.4.1.11591.2.3          CMS contentType
   1.3.6.1.4.1.11591.2.3.1          OpenPGP keyblock (as octet string)
   1.3.6.1.4.1.11591.2.4          LDAP stuff
@@ -1570,6 +1620,8 @@ Status codes are:
   1.3.6.1.4.1.11591.2.12242973   invalid encoded OID
 #+end_example
 
+The OpenPGP KDF/KEK parameter extension is used to convey additional
+info for OpenPGP keys as an X.509 extensions.
 
 
 * Debug flags
@@ -1613,7 +1665,10 @@ Description of some debug flags:
 ** List of useful RFCs
   - RFC-3447 :: PKCS  #1: RSA Cryptography Specifications Version 2.1
   - RFC-4880 :: OpenPGP
+  - RFC-5083 :: CMS - Authenticated-Enveloped-Data
+  - RFC-5084 :: CMS - AES-GCM
   - RFC-5280 :: X.509 PKI Certificate and CRL Profile
+  - RFC-5652 :: CMS (STD0070)
   - RFC-6818 :: Updates to the X.509 PKI Certificate and CRL Profile
   - RFC-8398 :: Internationalized Email Addresses in X.509 Certificates.
   - RFC-8399 :: Internationalization Updates to RFC 5280

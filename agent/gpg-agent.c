@@ -59,6 +59,7 @@
 #include "../common/gc-opt-flags.h"
 #include "../common/exechelp.h"
 #include "../common/asshelp.h"
+#include "../common/comopt.h"
 #include "../common/init.h"
 
 
@@ -868,7 +869,7 @@ parse_rereadable_options (gpgrt_argparse_t *pargs, int reread)
       memset (opt.disable_daemon, 0, sizeof opt.disable_daemon);
       disable_check_own_socket = 0;
       /* Note: When changing the next line, change also gpgconf_list.  */
-      opt.ssh_fingerprint_digest = GCRY_MD_MD5;
+      opt.ssh_fingerprint_digest = GCRY_MD_SHA256;
       opt.s2k_count = 0;
       set_s2k_calibration_time (0);  /* Set to default.  */
       return 1;
@@ -1317,6 +1318,13 @@ main (int argc, char **argv)
 
   finalize_rereadable_options ();
 
+  /* Get a default log file from common.conf.  */
+  if (!logfile && !parse_comopt (GNUPG_MODULE_NAME_AGENT, debug_argparser))
+    {
+      logfile = comopt.logfile;
+      comopt.logfile = NULL;
+    }
+
   /* Print a warning if an argument looks like an option.  */
   if (!opt.quiet && !(pargs.flags & ARGPARSE_FLAG_STOP_SEEN))
     {
@@ -1428,7 +1436,7 @@ main (int argc, char **argv)
       es_printf ("max-passphrase-days:%lu:%d:\n",
                  GC_OPT_FLAG_DEFAULT, MAX_PASSPHRASE_DAYS);
       es_printf ("ssh-fingerprint-digest:%lu:\"%s:\n",
-                 GC_OPT_FLAG_DEFAULT, "md5");
+                 GC_OPT_FLAG_DEFAULT, "sha256");
 
       agent_exit (0);
     }
@@ -1986,6 +1994,7 @@ reread_configuration (void)
   gpgrt_argparse_t pargs;
   char *twopart;
   int dummy;
+  int logfile_seen = 0;
 
   if (!config_filename)
     return; /* No config file. */
@@ -2013,12 +2022,29 @@ reread_configuration (void)
       else if (pargs.r_opt < -1)
         pargs.err = ARGPARSE_PRINT_WARNING;
       else /* Try to parse this option - ignore unchangeable ones. */
-        parse_rereadable_options (&pargs, 1);
+        {
+          if (pargs.r_opt == oLogFile)
+            logfile_seen = 1;
+          parse_rereadable_options (&pargs, 1);
+        }
     }
   gpgrt_argparse (NULL, &pargs, NULL);  /* Release internal state.  */
   xfree (twopart);
+
   finalize_rereadable_options ();
   set_debug ();
+
+  /* Get a default log file from common.conf.  */
+  if (!logfile_seen && !parse_comopt (GNUPG_MODULE_NAME_AGENT, !!opt.debug))
+    {
+      if (!current_logfile || !comopt.logfile
+          || strcmp (current_logfile, comopt.logfile))
+        {
+          log_set_file (comopt.logfile);
+          xfree (current_logfile);
+          current_logfile = comopt.logfile? xtrystrdup (comopt.logfile) : NULL;
+        }
+    }
 }
 
 
@@ -2689,12 +2715,12 @@ do_start_connection_thread (ctrl_t ctrl)
 {
   active_connections++;
   agent_init_default_ctrl (ctrl);
-  if (opt.verbose && !DBG_IPC)
+  if (opt.verbose > 1 && !DBG_IPC)
     log_info (_("handler 0x%lx for fd %d started\n"),
               (unsigned long) npth_self(), FD2INT(ctrl->thread_startup.fd));
 
   start_command_handler (ctrl, GNUPG_INVALID_FD, ctrl->thread_startup.fd);
-  if (opt.verbose && !DBG_IPC)
+  if (opt.verbose > 1 && !DBG_IPC)
     log_info (_("handler 0x%lx for fd %d terminated\n"),
               (unsigned long) npth_self(), FD2INT(ctrl->thread_startup.fd));
 
@@ -3192,7 +3218,10 @@ check_own_socket (void)
 
   err = npth_attr_init (&tattr);
   if (err)
-    return;
+    {
+      xfree (sockname);
+      return;
+    }
   npth_attr_setdetachstate (&tattr, NPTH_CREATE_DETACHED);
   err = npth_create (&thread, &tattr, check_own_socket_thread, sockname);
   if (err)

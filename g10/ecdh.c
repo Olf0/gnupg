@@ -101,8 +101,12 @@ extract_secret_x (byte **r_secret_x,
      41 || X
 
      Since it may come with the prefix, the size of point is larger
-     than or equals to the size of an integer X.  */
+     than or equals to the size of an integer X.  We also better check
+     that the provided shared point is not larger than the size needed
+     to represent the point.  */
   if (point_nbytes < secret_x_size)
+    return gpg_error (GPG_ERR_BAD_DATA);
+  if (point_nbytes < nshared)
     return gpg_error (GPG_ERR_BAD_DATA);
 
   /* Extract x component of the shared point: this is the actual
@@ -113,13 +117,18 @@ extract_secret_x (byte **r_secret_x,
 
   memcpy (secret_x, shared, nshared);
 
-  /* Remove the prefix.  */
-  if ((point_nbytes & 1))
-    memmove (secret_x, secret_x+1, secret_x_size);
+  /* Wrangle the provided point unless only the x-component w/o any
+   * prefix was provided.  */
+  if (nshared != secret_x_size)
+    {
+      /* Remove the prefix.  */
+      if ((point_nbytes & 1))
+        memmove (secret_x, secret_x+1, secret_x_size);
 
-  /* Clear the rest of data.  */
-  if (point_nbytes - secret_x_size)
-    memset (secret_x+secret_x_size, 0, point_nbytes-secret_x_size);
+      /* Clear the rest of data.  */
+      if (point_nbytes - secret_x_size)
+        memset (secret_x+secret_x_size, 0, point_nbytes-secret_x_size);
+    }
 
   if (DBG_CRYPTO)
     log_printhex (secret_x, secret_x_size, "ECDH shared secret X is:");
@@ -129,6 +138,13 @@ extract_secret_x (byte **r_secret_x,
 }
 
 
+/* Build KDF parameters */
+/* RFC 6637 defines the KDF parameters and its encoding in Section
+   8. EC DH Algorighm (ECDH).  Since it was written for v4 key, it
+   said "20 octets representing a recipient encryption subkey or a
+   master key fingerprint".  For v5 key, it is considered "adequate"
+   (in terms of NIST SP 800 56A, see 5.8.2 FixedInfo) to use the first
+   20 octets of its 32 octets fingerprint.  */
 static gpg_error_t
 build_kdf_params (unsigned char kdf_params[256], size_t *r_size,
                   gcry_mpi_t *pkey, const byte pk_fp[MAX_FINGERPRINT_LEN])
@@ -150,7 +166,7 @@ build_kdf_params (unsigned char kdf_params[256], size_t *r_size,
   err = (err ? err : gpg_mpi_write_nohdr (obuf, pkey[2]));
   /* fixed-length field 4 */
   iobuf_write (obuf, "Anonymous Sender    ", 20);
-  /* fixed-length field 5, recipient fp */
+  /* fixed-length field 5, recipient fp (or first 20 octets of fp) */
   iobuf_write (obuf, pk_fp, 20);
 
   if (!err)

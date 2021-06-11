@@ -450,7 +450,7 @@ check_signature (ctrl_t ctrl,
 {
   gpg_error_t err;
   int algo, cert_idx;
-  gcry_sexp_t s_hash;
+  gcry_sexp_t s_hash = NULL;
   ksba_cert_t cert;
   const char *s;
 
@@ -534,6 +534,7 @@ check_signature (ctrl_t ctrl,
       err = ksba_ocsp_get_responder_id (ocsp, &name, &keyid);
       if (err)
         {
+          gcry_sexp_release (s_hash);
           log_error (_("error getting responder ID: %s\n"),
                      gcry_strerror (err));
           return err;

@@ -181,6 +181,10 @@ static struct
   { "1.3.6.1.4.1.11591.2.1.1", "pkaAddress" },
   { "1.3.6.1.4.1.11591.2.2.1", "standaloneCertificate" },
   { "1.3.6.1.4.1.11591.2.2.2", "wellKnownPrivateKey" },
+  { "1.3.6.1.4.1.11591.2.6.1", "gpgUsageCert", OID_FLAG_KP },
+  { "1.3.6.1.4.1.11591.2.6.2", "gpgUsageSign", OID_FLAG_KP },
+  { "1.3.6.1.4.1.11591.2.6.3", "gpgUsageEncr", OID_FLAG_KP },
+  { "1.3.6.1.4.1.11591.2.6.4", "gpgUsageAuth", OID_FLAG_KP },
 
   /* Extensions used by the Bundesnetzagentur.  */
   { "1.3.6.1.4.1.8301.3.5", "validityModel" },
@@ -788,6 +792,8 @@ list_cert_raw (ctrl_t ctrl, KEYDB_HANDLE hd,
   ksba_name_t name, name2;
   unsigned int reason;
   const unsigned char *cert_der = NULL;
+  char *algostr;
+  int algoid;
 
   (void)have_secret;
 
@@ -841,6 +847,47 @@ list_cert_raw (ctrl_t ctrl, KEYDB_HANDLE hd,
   es_fprintf (fp, "      md5_fpr: %s\n", dn?dn:"error");
   xfree (dn);
 
+  algoid = 0;
+  algostr = gpgsm_pubkey_algo_string (cert, &algoid);
+
+  /* For RSA we support printing an OpenPGP v4 fingerprint under the
+   * assumption that the not-before date would be used as the OpenPGP
+   * key creation date.  */
+  if (algoid == GCRY_PK_RSA)
+    {
+      ksba_sexp_t pk;
+      size_t pklen;
+      const unsigned char *m, *e;
+      size_t mlen, elen;
+      unsigned char fpr20[20];
+      time_t tmpt;
+      unsigned long keytime;
+
+      pk = ksba_cert_get_public_key (cert);
+      if (pk)
+        {
+          ksba_cert_get_validity (cert, 0, t);
+          tmpt = isotime2epoch (t);
+          keytime = (tmpt == (time_t)(-1))? 0 : (u32)tmpt;
+
+          pklen = gcry_sexp_canon_len (pk, 0, NULL, NULL);
+          if (!pklen)
+            log_error ("libksba did not return a proper S-Exp\n");
+          else if (!get_rsa_pk_from_canon_sexp (pk, pklen,
+                                                &m, &mlen, &e, &elen)
+                   && !compute_openpgp_fpr_rsa (4,
+                                                keytime,
+                                                m, mlen, e, elen,
+                                                fpr20, NULL))
+            {
+              char *fpr = bin2hex (fpr20, 20, NULL);
+              es_fprintf (fp, "      pgp_fpr: %s\n", fpr);
+              xfree (fpr);
+            }
+          ksba_free (pk);
+        }
+    }
+
   dn = gpgsm_get_certid (cert);
   es_fprintf (fp, "       certid: %s\n", dn?dn:"error");
   xfree (dn);
@@ -862,13 +909,7 @@ list_cert_raw (ctrl_t ctrl, KEYDB_HANDLE hd,
   s = get_oid_desc (oid, 0, NULL);
   es_fprintf (fp, "     hashAlgo: %s%s%s%s\n", oid, s?" (":"",s?s:"",s?")":"");
 
-  {
-    char *algostr;
-
-    algostr = gpgsm_pubkey_algo_string (cert, NULL);
-    es_fprintf (fp, "      keyType: %s\n", algostr? algostr : "[error]");
-    xfree (algostr);
-  }
+  es_fprintf (fp, "      keyType: %s\n", algostr? algostr : "[error]");
 
   /* subjectKeyIdentifier */
   es_fputs ("    subjKeyId: ", fp);
@@ -1150,6 +1191,7 @@ list_cert_raw (ctrl_t ctrl, KEYDB_HANDLE hd,
         es_fprintf (fp, "  [stored as ephemeral]\n");
     }
 
+  xfree (algostr);
 }
 
 
@@ -1705,4 +1747,99 @@ gpgsm_list_keys (ctrl_t ctrl, strlist_t names, estream_t fp,
   if (!err && (mode & (1<<7)))
     err = list_external_keys (ctrl, names, fp, (mode&256));
   return err;
+}
+
+
+
+static gpg_error_t
+do_show_certs (ctrl_t ctrl, const char *fname, estream_t outfp)
+{
+  gpg_error_t err;
+  gnupg_ksba_io_t b64reader = NULL;
+  ksba_reader_t reader;
+  ksba_cert_t cert = NULL;
+  estream_t fp;
+  int any = 0;
+
+  if (!fname || (fname[0] == '-' && !fname[1]))
+    {
+      fp = es_stdin;
+      fname = "[stdin]";
+    }
+  else
+    {
+      fp = es_fopen (fname, "rb");
+      if (!fp)
+        {
+          err = gpg_error_from_syserror ();
+          log_error (_("can't open '%s': %s\n"), fname, gpg_strerror (err));
+          return err;
+        }
+    }
+
+  err = gnupg_ksba_create_reader
+    (&b64reader, ((ctrl->is_pem? GNUPG_KSBA_IO_PEM : 0)
+                  | (ctrl->is_base64? GNUPG_KSBA_IO_BASE64 : 0)
+                  | (ctrl->autodetect_encoding? GNUPG_KSBA_IO_AUTODETECT : 0)
+                  | GNUPG_KSBA_IO_MULTIPEM),
+     fp, &reader);
+  if (err)
+    {
+      log_error ("can't create reader: %s\n", gpg_strerror (err));
+      goto leave;
+    }
+
+  /* We need to loop here to handle multiple PEM objects per file. */
+  do
+    {
+      ksba_cert_release (cert); cert = NULL;
+
+      err = ksba_cert_new (&cert);
+      if (err)
+        goto leave;
+
+      err = ksba_cert_read_der (cert, reader);
+      if (err)
+        goto leave;
+
+      es_fprintf (outfp, "File ........: %s\n", fname);
+      list_cert_raw (ctrl, NULL, cert, outfp, 0, 0);
+      es_putc ('\n', outfp);
+      any = 1;
+
+      ksba_reader_clear (reader, NULL, NULL);
+    }
+  while (!gnupg_ksba_reader_eof_seen (b64reader));
+
+ leave:
+  if (any && gpg_err_code (err) == GPG_ERR_EOF)
+    err = 0;
+  ksba_cert_release (cert);
+  gnupg_ksba_destroy_reader (b64reader);
+  if (fp != es_stdin)
+    es_fclose (fp);
+  return err;
+}
+
+
+/* Show a raw dump of the certificates found in the files given in
+ * the arrag FILES.  Write output to FP.  */
+gpg_error_t
+gpgsm_show_certs (ctrl_t ctrl, int nfiles, char **files, estream_t fp)
+{
+  gpg_error_t saveerr = 0;
+  gpg_error_t err;
+
+  if (!nfiles)
+    saveerr = do_show_certs (ctrl, NULL, fp);
+  else
+    {
+      for (; nfiles; nfiles--, files++)
+        {
+          err = do_show_certs (ctrl, *files, fp);
+          if (err && !saveerr)
+            saveerr = err;
+        }
+    }
+  return saveerr;
 }

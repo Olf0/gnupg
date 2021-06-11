@@ -207,6 +207,10 @@ gpg_error_t get_ecc_q_from_canon_sexp (const unsigned char *keydata,
                                        size_t keydatalen,
                                        unsigned char const **r_q,
                                        size_t *r_qlen);
+gpg_error_t uncompress_ecc_q_in_canon_sexp (const unsigned char *keydata,
+                                            size_t keydatalen,
+                                            unsigned char **r_newkeydata,
+                                            size_t *r_newkeydatalen);
 
 int get_pk_algo_from_key (gcry_sexp_t key);
 int get_pk_algo_from_canon_sexp (const unsigned char *keydata,
@@ -245,6 +249,7 @@ int openpgp_oid_is_ed25519 (gcry_mpi_t a);
 int openpgp_oidbuf_is_cv25519 (const void *buf, size_t len);
 int openpgp_oid_is_cv25519 (gcry_mpi_t a);
 int openpgp_oid_is_cv448 (gcry_mpi_t a);
+int openpgp_oid_is_ed448 (gcry_mpi_t a);
 const char *openpgp_curve_to_oid (const char *name,
                                   unsigned int *r_nbits, int *r_algo);
 const char *openpgp_oid_to_curve (const char *oid, int canon);
@@ -258,7 +263,6 @@ const char *get_keyalgo_string (enum gcry_pk_algos algo,
 
 /*-- homedir.c --*/
 const char *standard_homedir (void);
-const char *default_homedir (void);
 void gnupg_set_homedir (const char *newdir);
 void gnupg_maybe_make_homedir (const char *fname, int quiet);
 const char *gnupg_homedir (void);

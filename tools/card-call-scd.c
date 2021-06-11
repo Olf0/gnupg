@@ -157,10 +157,12 @@ release_card_info (card_info_t info)
   while (info->kinfo)
     {
       key_info_t kinfo = info->kinfo->next;
+      xfree (info->kinfo->label);
       xfree (info->kinfo);
       info->kinfo = kinfo;
     }
   info->chvusage[0] = info->chvusage[1] = 0;
+  xfree (info->chvlabels); info->chvlabels = NULL;
   for (i=0; i < DIM(info->supported_keyalgo); i++)
     {
       free_strlist (info->supported_keyalgo[i]);
@@ -909,6 +911,41 @@ learn_status_cb (void *opaque, const char *line)
           parm->chvusage[0] = byte1;
           parm->chvusage[1] = byte2;
         }
+      else if (!memcmp (keyword, "CHV-LABEL", keywordlen))
+        {
+          xfree (parm->chvlabels);
+          parm->chvlabels = xstrdup (line);
+        }
+      else if (!memcmp (keyword, "KEY-LABEL", keywordlen))
+        {
+          /* The format of such a line is:
+           *   KEY-LABEL <keyref> [label|"-"]           */
+          const char *fields[2];
+          int nfields;
+          char *label;
+
+          line_buffer = pline = xstrdup (line);
+
+          if ((nfields = split_fields (line_buffer, fields, DIM (fields))) < 2)
+            goto leave;  /* not enough args - ignore.  */
+
+          keyref = fields[0];
+          /* We don't remove the percent escaping because that is only
+           * used in case of strange characters in the label; we
+           * should not print them.  Note that this info is only for
+           * human consumption, anyway.  */
+          label = xtrystrdup (fields[1]);
+          if (!label)
+            goto leave; /* We ignore malloc failures here.  */
+
+          /* Check whether we already have an item for the keyref.  */
+          kinfo = find_kinfo (parm, keyref);
+          if (!kinfo)  /* New entry.  */
+            kinfo = create_kinfo (parm, keyref);
+
+          xfree (kinfo->label);
+          kinfo->label = label;
+        }
       break;
 
     case 10:
@@ -948,6 +985,7 @@ learn_status_cb (void *opaque, const char *line)
                   while (spacep (p))
                     p++;
                 }
+              parm->nchvmaxlen = 3;
               for (i=0; *p && i < 3; i++)
                 {
                   parm->chvinfo[i] = atoi (p);
@@ -956,6 +994,7 @@ learn_status_cb (void *opaque, const char *line)
                   while (spacep (p))
                     p++;
                 }
+              parm->nchvinfo = 3;
             }
           else
             {
@@ -967,6 +1006,7 @@ learn_status_cb (void *opaque, const char *line)
                   while (spacep (p))
                     p++;
                 }
+              parm->nchvinfo = i;
             }
 
           xfree (buf);
@@ -1111,7 +1151,7 @@ learn_status_cb (void *opaque, const char *line)
 /* Call the scdaemon to learn about a smartcard.  This fills INFO
  * with data from the card. */
 gpg_error_t
-scd_learn (card_info_t info)
+scd_learn (card_info_t info, int reread)
 {
   gpg_error_t err;
   struct default_inq_parm_s parm;
@@ -1128,7 +1168,9 @@ scd_learn (card_info_t info)
     return err;
 
   parm.ctx = agent_ctx;
-  err = assuan_transact (agent_ctx, "SCD LEARN --force",
+  err = assuan_transact (agent_ctx,
+                         reread? "SCD LEARN --force --reread"
+                         /*  */: "SCD LEARN --force",
                          dummy_data_cb, NULL, default_inq_cb, &parm,
                          learn_status_cb, info);
   /* Also try to get some other key attributes.  */
@@ -1141,6 +1183,10 @@ scd_learn (card_info_t info)
           || gpg_err_code (err) == GPG_ERR_UNSUPPORTED_OPERATION)
         err = 0; /* Not implemented or GETATTR not supported.  */
       err = scd_getattr ("$DISPSERIALNO", info);
+      if (gpg_err_code (err) == GPG_ERR_INV_NAME
+          || gpg_err_code (err) == GPG_ERR_UNSUPPORTED_OPERATION)
+        err = 0; /* Not implemented or GETATTR not supported.  */
+      err = scd_getattr ("KEY-LABEL", info);
       if (gpg_err_code (err) == GPG_ERR_INV_NAME
           || gpg_err_code (err) == GPG_ERR_UNSUPPORTED_OPERATION)
         err = 0; /* Not implemented or GETATTR not supported.  */
@@ -1465,9 +1511,10 @@ scd_readcert (const char *certidstr, void **r_buf, size_t *r_buflen)
 
 
 /* Send a READKEY command to the SCdaemon.  On success a new
- * s-expression is stored at R_RESULT.  */
+ * s-expression is stored at R_RESULT.  If CREATE_SHADOW is set stub
+ * keys will be created if they do not exist. */
 gpg_error_t
-scd_readkey (const char *keyrefstr, gcry_sexp_t *r_result)
+scd_readkey (const char *keyrefstr, int create_shadow, gcry_sexp_t *r_result)
 {
   gpg_error_t err;
   char line[ASSUAN_LINELENGTH];
@@ -1481,7 +1528,10 @@ scd_readkey (const char *keyrefstr, gcry_sexp_t *r_result)
     return err;
 
   init_membuf (&data, 1024);
-  snprintf (line, DIM(line), "SCD READKEY %s", keyrefstr);
+  if (create_shadow)
+    snprintf (line, DIM(line), "READKEY --card -- %s", keyrefstr);
+  else
+    snprintf (line, DIM(line), "SCD READKEY %s", keyrefstr);
   err = assuan_transact (agent_ctx, line,
                          put_membuf_cb, &data,
                          NULL, NULL,

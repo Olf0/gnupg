@@ -419,12 +419,16 @@ pk_encrypt (pubkey_algo_t algo, gcry_mpi_t *resarr, gcry_mpi_t data,
     {
       gcry_mpi_t public, result;
       byte fp[MAX_FINGERPRINT_LEN];
-      size_t fpn;
       byte *shared;
       size_t nshared;
 
       /* Get the shared point and the ephemeral public key.  */
       shared = get_data_from_sexp (s_ciph, "s", &nshared);
+      if (!shared)
+        {
+          rc = gpg_error_from_syserror ();
+          goto leave;
+        }
       rc = sexp_extract_param_sos (s_ciph, "e", &public);
       gcry_sexp_release (s_ciph);
       s_ciph = NULL;
@@ -436,9 +440,7 @@ pk_encrypt (pubkey_algo_t algo, gcry_mpi_t *resarr, gcry_mpi_t data,
         }
 
       result = NULL;
-      fingerprint_from_pk (pk, fp, &fpn);
-      if (fpn != 20)
-        rc = gpg_error (GPG_ERR_INV_LENGTH);
+      fingerprint_from_pk (pk, fp, NULL);
 
       if (!rc)
         {
@@ -467,6 +469,7 @@ pk_encrypt (pubkey_algo_t algo, gcry_mpi_t *resarr, gcry_mpi_t data,
         resarr[1] = get_mpi_from_sexp (s_ciph, "b", GCRYMPI_FMT_USG);
     }
 
+ leave:
   gcry_sexp_release (s_ciph);
   return rc;
 }

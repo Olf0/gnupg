@@ -1,5 +1,5 @@
 /* gpg-card.c - An interactive tool to work with cards.
- * Copyright (C) 2019, 2020 g10 Code GmbH
+ * Copyright (C) 2019, 2020, 2021 g10 Code GmbH
  *
  * This file is part of GnuPG.
  *
@@ -22,6 +22,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #ifdef HAVE_LIBREADLINE
 # define GNUPG_LIBREADLINE_H_INCLUDED
 # include <readline/readline.h>
@@ -373,6 +374,14 @@ main (int argc, char **argv)
 }
 
 
+/* Return S or the string "[none]" if S is NULL.  */
+static GPGRT_INLINE const char *
+nullnone (const char *s)
+{
+  return s? s: "[none]";
+}
+
+
 /* Read data from file FNAME up to MAX_GET_DATA_FROM_FILE characters.
  * On error return an error code and stores NULL at R_BUFFER; on
  * success returns 0 and stores the number of bytes read at R_BUFLEN
@@ -648,7 +657,8 @@ mem_is_zero (const char *mem, unsigned int memlen)
  * reference if no info is available; it may be NULL.  */
 static void
 list_one_kinfo (card_info_t info, key_info_t kinfo,
-                const char *label_keyref, estream_t fp, int no_key_lookup)
+                const char *label_keyref, estream_t fp, int no_key_lookup,
+                int create_shadow)
 {
   gpg_error_t err;
   key_info_t firstkinfo = info->kinfo;
@@ -668,7 +678,10 @@ list_one_kinfo (card_info_t info, key_info_t kinfo,
         {
           tty_fprintf (fp, "[none]\n");
           tty_fprintf (fp, "      keyref .....: %s\n", kinfo->keyref);
-          tty_fprintf (fp, "      algorithm ..: %s\n", kinfo->keyalgo);
+          if (kinfo->label)
+            tty_fprintf (fp, "      label ......: %s\n", kinfo->label);
+          tty_fprintf (fp, "      algorithm ..: %s\n",
+                       nullnone (kinfo->keyalgo));
           goto leave;
         }
 
@@ -690,10 +703,13 @@ list_one_kinfo (card_info_t info, key_info_t kinfo,
         }
       tty_fprintf (fp, "\n");
 
-      if (!(err = scd_readkey (kinfo->keyref, &s_pkey)))
+      if (kinfo->label)
+        tty_fprintf (fp, "      label ......: %s\n", kinfo->label);
+
+      if (!(err = scd_readkey (kinfo->keyref, create_shadow, &s_pkey)))
         {
           char *tmp = pubkey_algo_string (s_pkey, NULL);
-          tty_fprintf (fp, "      algorithm ..: %s\n", tmp);
+          tty_fprintf (fp, "      algorithm ..: %s\n", nullnone (tmp));
           xfree (tmp);
           gcry_sexp_release (s_pkey);
           s_pkey = NULL;
@@ -701,7 +717,8 @@ list_one_kinfo (card_info_t info, key_info_t kinfo,
       else
         {
           maybe_set_card_removed (info, err);
-          tty_fprintf (fp, "      algorithm ..: %s\n", kinfo->keyalgo);
+          tty_fprintf (fp, "      algorithm ..: %s\n",
+                       nullnone (kinfo->keyalgo));
         }
 
       if (kinfo->fprlen && kinfo->created)
@@ -785,7 +802,8 @@ list_one_kinfo (card_info_t info, key_info_t kinfo,
       if (label_keyref)
         tty_fprintf (fp, "      keyref .....: %s\n", label_keyref);
       if (kinfo)
-        tty_fprintf (fp, "      algorithm ..: %s\n", kinfo->keyalgo);
+        tty_fprintf (fp, "      algorithm ..: %s\n",
+                     nullnone (kinfo->keyalgo));
     }
 
  leave:
@@ -796,7 +814,7 @@ list_one_kinfo (card_info_t info, key_info_t kinfo,
 /* List all keyinfo in INFO using the list of LABELS.  */
 static void
 list_all_kinfo (card_info_t info, keyinfolabel_t labels, estream_t fp,
-                int no_key_lookup)
+                int no_key_lookup, int create_shadow)
 {
   key_info_t kinfo;
   int idx, i, j;
@@ -812,7 +830,7 @@ list_all_kinfo (card_info_t info, keyinfolabel_t labels, estream_t fp,
           tty_fprintf (fp, "%s", labels[idx].label);
           kinfo = find_kinfo (info, labels[idx].keyref);
           list_one_kinfo (info, kinfo, labels[idx].keyref,
-                          fp, no_key_lookup);
+                          fp, no_key_lookup, create_shadow);
           if (kinfo)
             kinfo->xflag = 1;
         }
@@ -825,14 +843,46 @@ list_all_kinfo (card_info_t info, keyinfolabel_t labels, estream_t fp,
       for (i=4+strlen (kinfo->keyref), j=0; i < 18; i++, j=1)
         tty_fprintf (fp, j? ".":" ");
       tty_fprintf (fp, ":");
-      list_one_kinfo (info, kinfo, NULL, fp, no_key_lookup);
+      list_one_kinfo (info, kinfo, NULL, fp, no_key_lookup, create_shadow);
     }
+}
+
+
+static void
+list_retry_counter (card_info_t info, estream_t fp)
+{
+  const char *s;
+  int i;
+
+  if (info->chvlabels)
+    tty_fprintf (fp, "PIN labels .......: %s\n", info->chvlabels);
+  tty_fprintf (fp, "PIN retry counter :");
+  for (i=0; i < DIM (info->chvinfo) && i < info->nchvinfo; i++)
+    {
+      if (info->chvinfo[i] >= 0)
+        tty_fprintf (fp, " %d", info->chvinfo[i]);
+      else
+        {
+          switch (info->chvinfo[i])
+            {
+            case -1: s = "[error]"; break;
+            case -2: s = "-"; break;  /* No such PIN or info not available. */
+            case -3: s = "[blocked]"; break;
+            case -4: s = "[nullpin]"; break;
+            case -5: s = "[verified]"; break;
+            default: s = "[?]"; break;
+            }
+          tty_fprintf (fp, " %s", s);
+        }
+    }
+  tty_fprintf (fp, "\n");
 }
 
 
 /* List OpenPGP card specific data.  */
 static void
-list_openpgp (card_info_t info, estream_t fp, int no_key_lookup)
+list_openpgp (card_info_t info, estream_t fp,
+              int no_key_lookup, int create_shadow)
 {
   static struct keyinfolabel_s keyinfolabels[] = {
     { "Signature key ....:", "OPENPGP.1" },
@@ -883,8 +933,7 @@ list_openpgp (card_info_t info, estream_t fp, int no_key_lookup)
                info->chv1_cached? _("not forced"): _("forced"));
   tty_fprintf (fp, "Max. PIN lengths .: %d %d %d\n",
                info->chvmaxlen[0], info->chvmaxlen[1], info->chvmaxlen[2]);
-  tty_fprintf (fp, "PIN retry counter : %d %d %d\n",
-               info->chvinfo[0], info->chvinfo[1], info->chvinfo[2]);
+  list_retry_counter (info, fp);
   tty_fprintf (fp, "Signature counter : %lu\n", info->sig_counter);
   tty_fprintf (fp, "Capabilities .....:");
   if (info->extcap.ki)
@@ -911,14 +960,14 @@ list_openpgp (card_info_t info, estream_t fp, int no_key_lookup)
                    info->uif[2] ? (info->uif[0]==2? "permanent": "on") : "off");
     }
 
-  list_all_kinfo (info, keyinfolabels, fp, no_key_lookup);
+  list_all_kinfo (info, keyinfolabels, fp, no_key_lookup, create_shadow);
 
 }
 
 
 /* List PIV card specific data.  */
 static void
-list_piv (card_info_t info, estream_t fp, int no_key_lookup)
+list_piv (card_info_t info, estream_t fp, int no_key_lookup, int create_shadow)
 {
   static struct keyinfolabel_s keyinfolabels[] = {
     { "PIV authentication:", "PIV.9A" },
@@ -927,8 +976,6 @@ list_piv (card_info_t info, estream_t fp, int no_key_lookup)
     { "Key management ...:", "PIV.9D" },
     { NULL, NULL }
   };
-  const char *s;
-  int i;
 
   if (info->chvusage[0] || info->chvusage[1])
     {
@@ -952,80 +999,34 @@ list_piv (card_info_t info, estream_t fp, int no_key_lookup)
       tty_fprintf (fp, "\n");
     }
 
-  tty_fprintf (fp, "PIN retry counter :");
-  for (i=0; i < DIM (info->chvinfo); i++)
-    {
-      if (info->chvinfo[i] > 0)
-        tty_fprintf (fp, " %d", info->chvinfo[i]);
-      else
-        {
-          switch (info->chvinfo[i])
-            {
-            case -1: s = "[error]"; break;
-            case -2: s = "-"; break;  /* No such PIN or info not available. */
-            case -3: s = "[blocked]"; break;
-            case -5: s = "[verified]"; break;
-            default: s = "[?]"; break;
-            }
-          tty_fprintf (fp, " %s", s);
-        }
-    }
-  tty_fprintf (fp, "\n");
-  list_all_kinfo (info, keyinfolabels, fp, no_key_lookup);
+  list_retry_counter (info, fp);
+  list_all_kinfo (info, keyinfolabels, fp, no_key_lookup, create_shadow);
 }
-
 
 
 /* List Netkey card specific data.  */
 static void
-list_nks (card_info_t info, estream_t fp, int no_key_lookup)
+list_nks (card_info_t info, estream_t fp, int no_key_lookup, int create_shadow)
 {
   static struct keyinfolabel_s keyinfolabels[] = {
     { NULL, NULL }
   };
-  const char *s;
-  int i;
 
-  tty_fprintf (fp, "PIN retry counter :");
-  for (i=0; i < DIM (info->chvinfo); i++)
-    {
-      if (info->chvinfo[i] >= 0)
-        tty_fprintf (fp, " %d", info->chvinfo[i]);
-      else
-        {
-          switch (info->chvinfo[i])
-            {
-            case -1: s = "[error]"; break;
-            case -2: s = "-"; break;  /* No such PIN or info not available. */
-            case -3: s = "[blocked]"; break;
-            case -4: s = "[nullpin]"; break;
-            case -5: s = "[verified]"; break;
-            default: s = "[?]"; break;
-            }
-          tty_fprintf (fp, " %s", s);
-        }
-    }
-  tty_fprintf (fp, "\n");
-  list_all_kinfo (info, keyinfolabels, fp, no_key_lookup);
+  list_retry_counter (info, fp);
+  list_all_kinfo (info, keyinfolabels, fp, no_key_lookup, create_shadow);
 }
 
 
 /* List PKCS#15 card specific data.  */
 static void
-list_p15 (card_info_t info, estream_t fp, int no_key_lookup)
+list_p15 (card_info_t info, estream_t fp, int no_key_lookup, int create_shadow)
 {
   static struct keyinfolabel_s keyinfolabels[] = {
     { NULL, NULL }
   };
-  int i;
 
-  tty_fprintf (fp, "PIN retry counter :");
-  for (i=0; i < DIM (info->chvinfo); i++)
-    {
-      tty_fprintf (fp, " %d", info->chvinfo[i]);
-    }
-  tty_fprintf (fp, "\n");
-  list_all_kinfo (info, keyinfolabels, fp, no_key_lookup);
+  list_retry_counter (info, fp);
+  list_all_kinfo (info, keyinfolabels, fp, no_key_lookup, create_shadow);
 }
 
 
@@ -1053,18 +1054,16 @@ print_a_version (estream_t fp, const char *prefix, unsigned int value)
  * NO_KEY_LOOKUP the sometimes expensive listing of all matching
  * OpenPGP and X.509 keys is not done */
 static void
-list_card (card_info_t info, int no_key_lookup)
+list_card (card_info_t info, int no_key_lookup, int create_shadow)
 {
   estream_t fp = opt.interactive? NULL : es_stdout;
 
-  tty_fprintf (fp, "Reader ...........: %s\n",
-               info->reader? info->reader : "[none]");
+  tty_fprintf (fp, "Reader ...........: %s\n", nullnone (info->reader));
   if (info->cardtype)
     tty_fprintf (fp, "Card type ........: %s\n", info->cardtype);
   if (info->cardversion)
     print_a_version (fp, "Card firmware ....:", info->cardversion);
-  tty_fprintf (fp, "Serial number ....: %s\n",
-               info->serialno? info->serialno : "[none]");
+  tty_fprintf (fp, "Serial number ....: %s\n", nullnone (info->serialno));
   tty_fprintf (fp, "Application type .: %s%s%s%s\n",
                app_type_string (info->apptype),
                info->apptype == APP_TYPE_UNKNOWN && info->apptypestr? "(":"",
@@ -1087,10 +1086,18 @@ list_card (card_info_t info, int no_key_lookup)
 
   switch (info->apptype)
     {
-    case APP_TYPE_OPENPGP: list_openpgp (info, fp, no_key_lookup); break;
-    case APP_TYPE_PIV:     list_piv (info, fp, no_key_lookup); break;
-    case APP_TYPE_NKS:     list_nks (info, fp, no_key_lookup); break;
-    case APP_TYPE_P15:     list_p15 (info, fp, no_key_lookup); break;
+    case APP_TYPE_OPENPGP:
+      list_openpgp (info, fp, no_key_lookup, create_shadow);
+      break;
+    case APP_TYPE_PIV:
+      list_piv (info, fp, no_key_lookup, create_shadow);
+      break;
+    case APP_TYPE_NKS:
+      list_nks (info, fp, no_key_lookup, create_shadow);
+      break;
+    case APP_TYPE_P15:
+      list_p15 (info, fp, no_key_lookup, create_shadow);
+      break;
     default: break;
     }
 }
@@ -1133,7 +1140,8 @@ static gpg_error_t
 cmd_list (card_info_t info, char *argstr)
 {
   gpg_error_t err;
-  int opt_cards, opt_apps, opt_info, opt_no_key_lookup;
+  int opt_cards, opt_apps, opt_info, opt_reread, opt_no_key_lookup;
+  int opt_shadow;
   strlist_t cards = NULL;
   strlist_t sl;
   estream_t fp = opt.interactive? NULL : es_stdout;
@@ -1144,23 +1152,31 @@ cmd_list (card_info_t info, char *argstr)
 
   if (!info)
     return print_help
-      ("LIST [--cards] [--apps] [--info] [--no-key-lookup] [N] [APP]\n\n"
+      ("LIST [--cards] [--apps] [--info] [--reread] [--shadow]"
+       " [--no-key-lookup] [N] [APP]\n\n"
        "Show the content of the current card.\n"
        "With N given select and list the N-th card;\n"
        "with APP also given select that application.\n"
        "To select an APP on the current card use '-' for N.\n"
        "The S/N of the card may be used instead of N.\n"
-       "  --cards   lists available cards\n"
-       "  --apps    lists additional card applications\n"
-       "  --info    selects a card and prints its s/n\n"
-       "  --no-key-lookup does not list matching OpenPGP or X.509 keys\n"
+       "  --cards   list available cards\n"
+       "  --apps    list additional card applications\n"
+       "  --info    select a card and prints its s/n\n"
+       "  --reread  read infos from PCKS#15 cards again\n"
+       "  --shadow  create shadow keys for all card keys\n"
+       "  --no-key-lookup do not list matching OpenPGP or X.509 keys\n"
        , 0);
 
   opt_cards = has_leading_option (argstr, "--cards");
   opt_apps = has_leading_option (argstr, "--apps");
   opt_info = has_leading_option (argstr, "--info");
+  opt_reread = has_leading_option (argstr, "--reread");
+  opt_shadow = has_leading_option (argstr, "--shadow");
   opt_no_key_lookup = has_leading_option (argstr, "--no-key-lookup");
   argstr = skip_options (argstr);
+
+  if (opt_shadow)
+    opt_no_key_lookup = 1;
 
   if (opt.no_key_lookup)
     opt_no_key_lookup = 1;
@@ -1288,7 +1304,7 @@ cmd_list (card_info_t info, char *argstr)
         }
 
       if (need_learn)
-        err = scd_learn (info);
+        err = scd_learn (info, opt_reread);
       else
         err = 0;
 
@@ -1332,7 +1348,7 @@ cmd_list (card_info_t info, char *argstr)
               goto leave;
             }
 
-          list_card (info, opt_no_key_lookup);
+          list_card (info, opt_no_key_lookup, opt_shadow);
         }
     }
 
@@ -1347,7 +1363,7 @@ cmd_list (card_info_t info, char *argstr)
 static gpg_error_t
 cmd_verify (card_info_t info, char *argstr)
 {
-  gpg_error_t err;
+  gpg_error_t err, err2;
   const char *pinref;
 
   if (!info)
@@ -1366,7 +1382,10 @@ cmd_verify (card_info_t info, char *argstr)
   if (err)
     log_error ("verify failed: %s <%s>\n",
                gpg_strerror (err), gpg_strsource (err));
-  return err;
+  /* In any case update the CHV status, so that the next "list" shows
+   * the correct retry counter values.  */
+  err2 = scd_getattr ("CHV-STATUS", info);
+  return err ? err : err2;
 }
 
 
@@ -1615,14 +1634,19 @@ cmd_login (card_info_t info, char *argstr)
   gpg_error_t err;
   char *data;
   size_t datalen;
+  int use_default_pin;
 
   if (!info)
     return print_help
-      ("LOGIN [--clear] [< FILE]\n\n"
+      ("LOGIN [--clear|--use-default-pin] [< FILE]\n\n"
        "Set the login data object.  If FILE is given the data is\n"
        "is read from that file.  This allows for binary data.\n"
-       "The option --clear deletes the login data.",
+       "The option --clear deletes the login data.  --use-default-pin\n"
+       "tells the card to always use the default PIN (\"123456\").",
        APP_TYPE_OPENPGP, 0);
+
+  use_default_pin = has_leading_option (argstr, "--use-default-pin");
+  argstr = skip_options (argstr);
 
   if (!strcmp (argstr, "--clear"))
     {
@@ -1642,12 +1666,22 @@ cmd_login (card_info_t info, char *argstr)
       data = tty_get (_("Login data (account name): "));
       trim_spaces (data);
       tty_kill_prompt ();
-      if (!*data || *data == CONTROL_D)
+      if ((!*data && !use_default_pin) || *data == CONTROL_D)
         {
           err = gpg_error (GPG_ERR_CANCELED);
           goto leave;
         }
       datalen = strlen (data);
+    }
+
+  if (use_default_pin)
+    {
+      char *tmpdata = xmalloc (datalen + 5);
+      memcpy (tmpdata, data, datalen);
+      memcpy (tmpdata+datalen, "\n\x14" "F=3", 5);
+      xfree (data);
+      data = tmpdata;
+      datalen += 5;
     }
 
   err = scd_setattr ("LOGIN-DATA", data, datalen);
@@ -1751,6 +1785,7 @@ cmd_salut (card_info_t info, const char *argstr)
         {
           tty_printf (_("Error: invalid response.\n"));
           xfree (data);
+          data = NULL;
           goto again;
         }
     }
@@ -1985,13 +2020,20 @@ cmd_writecert (card_info_t info, char *argstr)
 
   if (info->apptype == APP_TYPE_OPENPGP)
     {
-      if (ascii_strcasecmp (certref, "OPENPGP.3") && strcmp (certref, "3"))
+      if (!ascii_strcasecmp (certref, "OPENPGP.3") || !strcmp (certref, "3"))
+        certref_buffer = xstrdup ("OPENPGP.3");
+      else if (!ascii_strcasecmp (certref, "OPENPGP.2")||!strcmp (certref,"2"))
+        certref_buffer = xstrdup ("OPENPGP.2");
+      else if (!ascii_strcasecmp (certref, "OPENPGP.1")||!strcmp (certref,"1"))
+        certref_buffer = xstrdup ("OPENPGP.1");
+      else
         {
           err = gpg_error (GPG_ERR_INV_ID);
-          log_error ("Error: CERTREF must be \"3\" or \"OPENPGP.3\"\n");
+          log_error ("Error: CERTREF must be OPENPGP.N or just N"
+                     " with N being 1..3\"");
           goto leave;
         }
-      certref = certref_buffer = xstrdup ("OPENPGP.3");
+      certref = certref_buffer;
     }
   else /* Upcase the certref; prepend cardtype if needed.  */
     {
@@ -2123,13 +2165,20 @@ cmd_readcert (card_info_t info, char *argstr)
 
   if (info->apptype == APP_TYPE_OPENPGP)
     {
-      if (ascii_strcasecmp (certref, "OPENPGP.3") && strcmp (certref, "3"))
+      if (!ascii_strcasecmp (certref, "OPENPGP.3") || !strcmp (certref, "3"))
+        certref_buffer = xstrdup ("OPENPGP.3");
+      else if (!ascii_strcasecmp (certref, "OPENPGP.2")||!strcmp (certref,"2"))
+        certref_buffer = xstrdup ("OPENPGP.2");
+      else if (!ascii_strcasecmp (certref, "OPENPGP.1")||!strcmp (certref,"1"))
+        certref_buffer = xstrdup ("OPENPGP.1");
+      else
         {
           err = gpg_error (GPG_ERR_INV_ID);
-          log_error ("Error: CERTREF must be \"3\" or \"OPENPGP.3\"\n");
+          log_error ("Error: CERTREF must be OPENPGP.N or just N"
+                     " with N being 1..3\"");
           goto leave;
         }
-      certref = certref_buffer = xstrdup ("OPENPGP.3");
+      certref = certref_buffer;
     }
 
   if (*argstr == '>')  /* Write it to a file */
@@ -2641,7 +2690,7 @@ cmd_generate (card_info_t info, char *argstr)
 
   if (!err)
     {
-      err = scd_learn (info);
+      err = scd_learn (info, 0);
       if (err)
         log_error ("Error re-reading card: %s\n", gpg_strerror (err));
     }
@@ -2998,7 +3047,7 @@ cmd_factoryreset (card_info_t info)
    * specific resset command.
    */
 
-  err = scd_learn (info);
+  err = scd_learn (info, 0);
   if (gpg_err_code (err) == GPG_ERR_OBJ_TERM_STATE
       && gpg_err_source (err) == GPG_ERR_SOURCE_SCD)
     termstate = 1;
@@ -3454,7 +3503,7 @@ cmd_yubikey (card_info_t info, char *argstr)
   /* Note that we always do a learn to get a chance to the card back
    * into a usable state.  */
   err = yubikey_commands (info, fp, nwords, words);
-  err2 = scd_learn (info);
+  err2 = scd_learn (info, 0);
   if (err2)
     log_error ("Error re-reading card: %s\n", gpg_strerror (err));
 
@@ -3690,7 +3739,7 @@ dispatch_command (card_info_t info, const char *orig_command)
              || cmd == cmdINVCMD)
            && !info->initialized)
     {
-      err = scd_learn (info);
+      err = scd_learn (info, 0);
       if (err)
         {
           err = fixup_scd_errors (err);

@@ -1,7 +1,7 @@
 /* command.c - gpg-agent command handler
  * Copyright (C) 2001-2011 Free Software Foundation, Inc.
  * Copyright (C) 2001-2013 Werner Koch
- * Copyright (C) 2015 g10 Code GmbH.
+ * Copyright (C) 2015-2021 g10 Code GmbH.
  *
  * This file is part of GnuPG.
  *
@@ -442,6 +442,34 @@ leave_cmd (assuan_context_t ctx, gpg_error_t err)
 }
 
 
+/* Take the keyinfo for cards from our local cache.  Actually this
+ * cache could be a global one but then we would need to employ
+ * reference counting.  */
+struct card_key_info_s *
+get_keyinfo_on_cards (ctrl_t ctrl)
+{
+  struct card_key_info_s *keyinfo_on_cards;
+
+  if (ctrl->server_local->last_card_keyinfo.ki
+      && ctrl->server_local->last_card_keyinfo.eventno == eventcounter.card
+      && (ctrl->server_local->last_card_keyinfo.maybe_key_change
+          == eventcounter.maybe_key_change))
+    {
+      keyinfo_on_cards = ctrl->server_local->last_card_keyinfo.ki;
+    }
+  else if (!agent_card_keyinfo (ctrl, NULL, 0, &keyinfo_on_cards))
+    {
+      agent_card_free_keyinfo (ctrl->server_local->last_card_keyinfo.ki);
+      ctrl->server_local->last_card_keyinfo.ki = keyinfo_on_cards;
+      ctrl->server_local->last_card_keyinfo.eventno = eventcounter.card;
+      ctrl->server_local->last_card_keyinfo.maybe_key_change
+        = eventcounter.maybe_key_change;
+    }
+
+  return keyinfo_on_cards;
+}
+
+
 
 static const char hlp_geteventcounter[] =
   "GETEVENTCOUNTER\n"
@@ -602,34 +630,132 @@ cmd_marktrusted (assuan_context_t ctx, char *line)
 
 static const char hlp_havekey[] =
   "HAVEKEY <hexstrings_with_keygrips>\n"
+  "HAVEKEY --list[=<limit>]\n"
   "\n"
   "Return success if at least one of the secret keys with the given\n"
-  "keygrips is available.";
+  "keygrips is available.  With --list return all availabale keygrips\n"
+  "as binary data; with <limit> bail out at this number of keygrips";
 static gpg_error_t
 cmd_havekey (assuan_context_t ctx, char *line)
 {
+  ctrl_t ctrl;
   gpg_error_t err;
-  unsigned char buf[20];
+  unsigned char grip[20];
+  char *p;
+  int list_mode;  /* Less than 0 for no limit.  */
+  int counter;
+  char *dirname;
+  gnupg_dir_t dir;
+  gnupg_dirent_t dir_entry;
+  char hexgrip[41];
+  struct card_key_info_s *keyinfo_on_cards, *l;
 
-  do
+  if (has_option_name (line, "--list"))
     {
-      err = parse_keygrip (ctx, line, buf);
-      if (err)
-        return err;
-
-      if (!agent_key_available (buf))
-        return 0; /* Found.  */
-
-      while (*line && *line != ' ' && *line != '\t')
-        line++;
-      while (*line == ' ' || *line == '\t')
-        line++;
+      if ((p = option_value (line, "--list")))
+	list_mode = atoi (p);
+      else
+	list_mode = -1;
     }
-  while (*line);
+  else
+    list_mode = 0;
 
-  /* No leave_cmd() here because errors are expected and would clutter
-     the log.  */
-  return gpg_error (GPG_ERR_NO_SECKEY);
+
+  if (!list_mode)
+    {
+      do
+        {
+          err = parse_keygrip (ctx, line, grip);
+          if (err)
+            return err;
+
+          if (!agent_key_available (grip))
+            return 0; /* Found.  */
+
+          while (*line && *line != ' ' && *line != '\t')
+            line++;
+          while (*line == ' ' || *line == '\t')
+            line++;
+        }
+      while (*line);
+
+      /* No leave_cmd() here because errors are expected and would clutter
+       * the log.  */
+      return gpg_error (GPG_ERR_NO_SECKEY);
+    }
+
+  /* List mode.  */
+  dir = NULL;
+  dirname = NULL;
+  ctrl = assuan_get_pointer (ctx);
+
+  if (ctrl->restricted)
+    {
+      err = gpg_error (GPG_ERR_FORBIDDEN);
+      goto leave;
+    }
+
+  dirname = make_filename_try (gnupg_homedir (),
+                               GNUPG_PRIVATE_KEYS_DIR, NULL);
+  if (!dirname)
+    {
+      err = gpg_error_from_syserror ();
+      goto leave;
+    }
+  dir = gnupg_opendir (dirname);
+  if (!dir)
+    {
+      err = gpg_error_from_syserror ();
+      goto leave;
+    }
+
+  counter = 0;
+  while ((dir_entry = gnupg_readdir (dir)))
+    {
+      if (strlen (dir_entry->d_name) != 44
+          || strcmp (dir_entry->d_name + 40, ".key"))
+        continue;
+      strncpy (hexgrip, dir_entry->d_name, 40);
+      hexgrip[40] = 0;
+
+      if ( hex2bin (hexgrip, grip, 20) < 0 )
+        continue; /* Bad hex string.  */
+
+      if (list_mode > 0 && ++counter > list_mode)
+        {
+          err = gpg_error (GPG_ERR_TRUNCATED);
+          goto leave;
+        }
+
+      err = assuan_send_data (ctx, grip, 20);
+      if (err)
+        goto leave;
+    }
+
+  /* And now the keys from the current cards.  If they already got a
+   * stub, they are listed twice but we don't care.  */
+  keyinfo_on_cards = get_keyinfo_on_cards (ctrl);
+  for (l = keyinfo_on_cards; l; l = l->next)
+    {
+      if ( hex2bin (l->keygrip, grip, 20) < 0 )
+        continue; /* Bad hex string.  */
+
+      if (list_mode > 0 && ++counter > list_mode)
+        {
+          err = gpg_error (GPG_ERR_TRUNCATED);
+          goto leave;
+        }
+
+      err = assuan_send_data (ctx, grip, 20);
+      if (err)
+        goto leave;
+    }
+  err = 0;
+
+ leave:
+  gnupg_closedir (dir);
+  xfree (dirname);
+  return leave_cmd (ctx, err);
 }
 
 
@@ -1018,10 +1144,11 @@ cmd_genkey (assuan_context_t ctx, char *line)
 
   /* First inquire the parameters */
   rc = print_assuan_status (ctx, "INQUIRE_MAXLEN", "%u", MAXLEN_KEYPARAM);
-  if (!rc)
-    rc = assuan_inquire (ctx, "KEYPARAM", &value, &valuelen, MAXLEN_KEYPARAM);
   if (rc)
-    return rc;
+    goto leave;
+  rc = assuan_inquire (ctx, "KEYPARAM", &value, &valuelen, MAXLEN_KEYPARAM);
+  if (rc)
+    goto leave;
 
   init_membuf (&outbuf, 512);
 
@@ -1073,8 +1200,8 @@ cmd_genkey (assuan_context_t ctx, char *line)
 
 
 static const char hlp_readkey[] =
-  "READKEY <hexstring_with_keygrip>\n"
-  "        --card <keyid>\n"
+  "READKEY [--no-data] <hexstring_with_keygrip>\n"
+  "                    --card <keyid>\n"
   "\n"
   "Return the public key for the given keygrip or keyid.\n"
   "With --card, private key file with card information will be created.";
@@ -1087,12 +1214,14 @@ cmd_readkey (assuan_context_t ctx, char *line)
   gcry_sexp_t s_pkey = NULL;
   unsigned char *pkbuf = NULL;
   char *serialno = NULL;
+  char *keyidbuf = NULL;
   size_t pkbuflen;
-  int opt_card;
+  int opt_card, opt_no_data;
 
   if (ctrl->restricted)
     return leave_cmd (ctx, gpg_error (GPG_ERR_FORBIDDEN));
 
+  opt_no_data = has_option (line, "--no-data");
   opt_card = has_option (line, "--card");
   line = skip_options (line);
 
@@ -1107,6 +1236,11 @@ cmd_readkey (assuan_context_t ctx, char *line)
                      gpg_strerror (rc));
           goto leave;
         }
+
+      /* Hack to create the shadow key for the OpenPGP standard keys.  */
+      if ((!strcmp (keyid, "$SIGNKEYID") || !strcmp (keyid, "$ENCRKEYID"))
+          && !agent_card_getattr (ctrl, keyid, &keyidbuf, NULL))
+        keyid = keyidbuf;
 
       rc = agent_card_readkey (ctrl, keyid, &pkbuf, NULL);
       if (rc)
@@ -1125,11 +1259,15 @@ cmd_readkey (assuan_context_t ctx, char *line)
           goto leave;
         }
 
-      rc = agent_write_shadow_key (grip, serialno, keyid, pkbuf, 0);
-      if (rc)
-        goto leave;
+      if (agent_key_available (grip))
+        {
+          /* (Shadow)-key is not available in our key storage.  */
+          rc = agent_write_shadow_key (grip, serialno, keyid, pkbuf, 0);
+          if (rc)
+            goto leave;
+        }
 
-      rc = assuan_send_data (ctx, pkbuf, pkbuflen);
+        rc = opt_no_data? 0 : assuan_send_data (ctx, pkbuf, pkbuflen);
     }
   else
     {
@@ -1149,12 +1287,13 @@ cmd_readkey (assuan_context_t ctx, char *line)
             {
               pkbuflen = gcry_sexp_sprint (s_pkey, GCRYSEXP_FMT_CANON,
                                            pkbuf, pkbuflen);
-              rc = assuan_send_data (ctx, pkbuf, pkbuflen);
+              rc = opt_no_data? 0 : assuan_send_data (ctx, pkbuf, pkbuflen);
             }
         }
     }
 
  leave:
+  xfree (keyidbuf);
   xfree (serialno);
   xfree (pkbuf);
   gcry_sexp_release (s_pkey);
@@ -1411,24 +1550,7 @@ cmd_keyinfo (assuan_context_t ctx, char *line)
   if (opt_with_ssh || list_mode == 2)
     cf = ssh_open_control_file ();
 
-  /* Take the keyinfo for cards from our local cache.  Actually this
-   * cache could be a global one but then we would need to employ
-   * reference counting. */
-  if (ctrl->server_local->last_card_keyinfo.ki
-      && ctrl->server_local->last_card_keyinfo.eventno == eventcounter.card
-      && (ctrl->server_local->last_card_keyinfo.maybe_key_change
-          == eventcounter.maybe_key_change))
-    {
-      keyinfo_on_cards = ctrl->server_local->last_card_keyinfo.ki;
-    }
-  else if (!agent_card_keyinfo (ctrl, NULL, 0, &keyinfo_on_cards))
-    {
-      agent_card_free_keyinfo (ctrl->server_local->last_card_keyinfo.ki);
-      ctrl->server_local->last_card_keyinfo.ki = keyinfo_on_cards;
-      ctrl->server_local->last_card_keyinfo.eventno = eventcounter.card;
-      ctrl->server_local->last_card_keyinfo.maybe_key_change
-        = eventcounter.maybe_key_change;
-    }
+  keyinfo_on_cards = get_keyinfo_on_cards (ctrl);
 
   if (list_mode == 2)
     {
@@ -3968,9 +4090,14 @@ start_command_handler (ctrl_t ctrl, gnupg_fd_t listen_fd, gnupg_fd_t fd)
       rc = assuan_get_peercred (ctx, &client_creds);
       if (rc)
         {
-
+          /* Note that on Windows we don't get the peer credentials
+           * and thus we silence the error.  */
           if (listen_fd == GNUPG_INVALID_FD && fd == GNUPG_INVALID_FD)
             ;
+#ifdef HAVE_W32_SYSTEM
+          else if (gpg_err_code (rc) == GPG_ERR_ASS_GENERAL)
+            ;
+#endif
           else
             log_info ("Assuan get_peercred failed: %s\n", gpg_strerror (rc));
           pid = assuan_get_pid (ctx);

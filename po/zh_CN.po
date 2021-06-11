@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: GNU gnupg 2.2.27\n"
 "Report-Msgid-Bugs-To: translations@gnupg.org\n"
-"PO-Revision-Date: 2021-02-23 01:08+0800\n"
+"PO-Revision-Date: 2021-06-11 13:19+0900\n"
 "Last-Translator: bobwxc <bobwxc@yeah.net>\n"
 "Language-Team: None\n"
 "Language: zh_CN\n"
@@ -134,6 +134,30 @@ msgstr "错误的 PIN"
 msgid "Bad Passphrase"
 msgstr "错误的密码"
 
+msgid "Note: Request from the web browser."
+msgstr "注意：来自网络浏览器的请求。"
+
+msgid "Note: Request from a remote site."
+msgstr "注意：来自远程站点的请求。"
+
+#, c-format
+msgid "error getting serial number of card: %s\n"
+msgstr "获取卡的序列号时出现错误： %s\n"
+
+msgid "Please re-enter this passphrase"
+msgstr "请重新输入此密码"
+
+#, c-format
+msgid ""
+"Please enter the passphrase to protect the imported object within the %s "
+"system."
+msgstr "请输入密码以在 %s 系统内部保护已导入的对象。"
+
+msgid ""
+"This key (or subkey) is not protected with a passphrase.  Please enter a new "
+"passphrase to export it."
+msgstr "此密钥（或子密钥）未受密码保护。请输入新的密码以将其导出。"
+
 #, c-format
 msgid "ssh keys greater than %d bits are not supported\n"
 msgstr "长度超过 %d 位的 ssh 密钥不被支持\n"
@@ -169,9 +193,6 @@ msgstr "拒绝"
 #, c-format
 msgid "Please enter the passphrase for the ssh key%%0A  %F%%0A  (%c)"
 msgstr "请输入 ssh 密钥 %%0A  %F%%0A  (%c)  的密码"
-
-msgid "Please re-enter this passphrase"
-msgstr "请重新输入此密码"
 
 #, c-format
 msgid ""
@@ -326,6 +347,9 @@ msgstr "不使用 SCdaemon"
 
 msgid "|PGM|use PGM as the SCdaemon program"
 msgstr "|PGM|使用 PGM 作为 SCdaemon 程序"
+
+msgid "|PGM|use PGM as the tpm2daemon program"
+msgstr "|PGM|使用 PGM 作为 tpm2daemon 程序"
 
 msgid "|NAME|accept some commands via NAME"
 msgstr "|NAME|通过 NAME 接收一些命令"
@@ -1059,6 +1083,22 @@ msgid "invalid radix64 character %02x skipped\n"
 msgstr "无效的 radix64 字符 %02x 已被跳过\n"
 
 #, c-format
+msgid "Sorry, we are in batchmode - can't get input\n"
+msgstr "抱歉，现为批处理模式——无法获取输入\n"
+
+#, c-format
+msgid "Sorry, no terminal at all requested - can't get input\n"
+msgstr "抱歉，要求了无终端模式——无法获取输入\n"
+
+#, c-format
+msgid "too many errors; giving up\n"
+msgstr "错误过多；放弃\n"
+
+#, c-format
+msgid "Control-D detected\n"
+msgstr "检测到 Control-D\n"
+
+#, c-format
 msgid "conversion from '%s' to '%s' not available\n"
 msgstr "不能从 ‘%s’ 转换到 ‘%s’\n"
 
@@ -1221,6 +1261,10 @@ msgid "%s is not compliant with %s mode\n"
 msgstr "%s 与 %s 模式不兼容\n"
 
 #, c-format
+msgid "error from TPM: %s\n"
+msgstr "来自 TPM 的错误：%s\n"
+
+#, c-format
 msgid "problem with the agent: %s\n"
 msgstr "代理人程序出现问题：%s\n"
 
@@ -1296,10 +1340,6 @@ msgstr "非强制"
 
 msgid "forced"
 msgstr "强制"
-
-#, c-format
-msgid "error getting serial number of card: %s\n"
-msgstr "获取卡的序列号时出现错误： %s\n"
 
 msgid "Error: Only plain ASCII is currently allowed.\n"
 msgstr "错误：目前只允许使用纯 ASCII 字符。\n"
@@ -1919,7 +1959,7 @@ msgid "export keys"
 msgstr "导出密钥"
 
 msgid "export keys to a keyserver"
-msgstr "个密钥导出到一个公钥服务器上"
+msgstr "把密钥导出到一个公钥服务器上"
 
 msgid "import keys from a keyserver"
 msgstr "从公钥服务器上导入密钥"
@@ -3262,6 +3302,9 @@ msgstr "增加一个密钥到智能卡"
 msgid "move a key to a smartcard"
 msgstr "移动一个密钥到智能卡"
 
+msgid "convert a key to TPM form using the local TPM"
+msgstr "使用本地 TPM 将密钥转换为 TPM 形式"
+
 msgid "move a backup key to a smartcard"
 msgstr "移动一个备份密钥到智能卡上"
 
@@ -4189,6 +4232,10 @@ msgstr ""
 "我们需要生成大量的随机字节。在质数生成期间做些其他操作（敲打键盘\n"
 "、移动鼠标、读写硬盘之类的）将会是一个不错的主意；这会让随机数\n"
 "发生器有更好的机会获得足够的熵。\n"
+
+#, c-format
+msgid "WARNING: v4 is specified, but overridden by v5.\n"
+msgstr "警告：已指定 v4，但被 v5 覆盖。\n"
 
 #, c-format
 msgid "Key generation failed: %s\n"
@@ -6190,6 +6237,14 @@ msgstr "响应不包含公钥数据\n"
 msgid "||Please enter the PIN for the key to create qualified signatures."
 msgstr "||请为这个密钥输入 PIN 以创建合格的签名。"
 
+#. TRANSLATORS: Do not translate the "|A|" prefix but keep it at
+#. the start of the string.  Use %0A (single percent) for a linefeed.
+msgid "|A|Please enter the Admin PIN"
+msgstr "|A|请输入管理员 PIN"
+
+msgid "|P|Please enter the PIN Unblocking Code (PUK) for the standard keys."
+msgstr "|NP|请输入标准密钥的 PIN 解锁码（PUK）。"
+
 msgid "||Please enter the PIN for the standard keys."
 msgstr "||请输入标准密钥的 PIN。"
 
@@ -6213,9 +6268,6 @@ msgstr "|N|请为标准密钥输入一个新的 PIN。"
 
 msgid "|NP|Please enter a new PIN Unblocking Code (PUK) for the standard keys."
 msgstr "|NP|请为标准密钥输入一个新的 PIN 解锁码（PUK）。"
-
-msgid "|P|Please enter the PIN Unblocking Code (PUK) for the standard keys."
-msgstr "|NP|请输入标准密钥的 PIN 解锁码（PUK）。"
 
 msgid "|N|Please enter a new PIN for the key to create qualified signatures."
 msgstr "|N|请为这个密钥输入一个新的 PIN 以创建合格的签名。"
@@ -6285,11 +6337,6 @@ msgid "%d Admin PIN attempt remaining before card is permanently locked\n"
 msgid_plural ""
 "%d Admin PIN attempts remaining before card is permanently locked\n"
 msgstr[0] "在卡片被永久锁定之前剩余 %d 次管理员 PIN 尝试\n"
-
-#. TRANSLATORS: Do not translate the "|A|" prefix but keep it at
-#. the start of the string.  Use %0A (single percent) for a linefeed.
-msgid "|A|Please enter the Admin PIN"
-msgstr "|A|请输入管理员 PIN"
 
 #, c-format
 msgid "access to admin commands is not configured\n"
@@ -8515,6 +8562,9 @@ msgstr "私钥"
 msgid "Smartcards"
 msgstr "智能卡"
 
+msgid "TPM"
+msgstr "TPM"
+
 msgid "Network"
 msgstr "网络"
 
@@ -8871,9 +8921,6 @@ msgstr "管理命令历史记录"
 
 #~ msgid "error writing to %s: %s\n"
 #~ msgstr "写入 %s 时出现错误：%s\n"
-
-#~ msgid "error reading from %s: %s\n"
-#~ msgstr "读取 %s 时出现错误：%s\n"
 
 #~ msgid "error closing %s: %s\n"
 #~ msgstr "关闭 %s 时出现错误：%s\n"

@@ -20,7 +20,7 @@
 
 # Process this file with autoconf to produce a configure script.
 AC_PREREQ([2.61])
-min_automake_version="1.14"
+min_automake_version="1.16.3"
 
 # To build a release you need to create a tag with the version number
 # (git tag -s gnupg-2.n.m) and run "./autogen.sh --force".  Please
@@ -29,7 +29,7 @@ min_automake_version="1.14"
 m4_define([mym4_package],[gnupg])
 m4_define([mym4_major], [2])
 m4_define([mym4_minor], [3])
-m4_define([mym4_micro], [0])
+m4_define([mym4_micro], [2])
 
 # To start a new development series, i.e a new major or minor number
 # you need to mark an arbitrary commit before the first beta release
@@ -51,7 +51,7 @@ m4_esyscmd([echo ]mym4_version[>VERSION])
 AC_INIT([mym4_package],[mym4_version],[https://bugs.gnupg.org])
 
 # When changing the SWDB tag please also adjust the hard coded tags in
-# build-aux/speedo.mk and Makefile.am
+# build-aux/speedo.mk, build-aux/getswdb.sh, and Makefile.am
 AC_DEFINE_UNQUOTED(GNUPG_SWDB_TAG, "gnupg24", [swdb tag for this branch])
 
 NEED_GPGRT_VERSION=1.41
@@ -127,6 +127,7 @@ GNUPG_BUILD_PROGRAM(scdaemon, yes)
 GNUPG_BUILD_PROGRAM(g13, no)
 GNUPG_BUILD_PROGRAM(dirmngr, yes)
 GNUPG_BUILD_PROGRAM(keyboxd, yes)
+GNUPG_BUILD_PROGRAM(tpm2d, yes)
 GNUPG_BUILD_PROGRAM(doc, yes)
 # We use gpgtar to unpack test data, hence we always build it.  If the
 # user opts out, we simply don't install it.
@@ -772,7 +773,7 @@ case "${host}" in
         build_wks_tools=no
         ;;
     *-apple-darwin*)
-        AC_DEFINE(_DARWIN_C_SOURCE, 900000L,
+        AC_DEFINE(_DARWIN_C_SOURCE, 1,
                   Expose all libc features (__DARWIN_C_FULL).)
         ;;
     *-*-netbsd*)
@@ -1593,23 +1594,44 @@ AC_SUBST(W32SOCKLIBS)
 #
 # TPM libtss library .. don't compile TPM support if we don't have it
 #
-_save_libs="$LIBS"
-_save_cflags="$CFLAGS"
-LIBS=""
-AC_SEARCH_LIBS([TSS_Create], [tss ibmtss],have_libtss=IBM,
-    AC_SEARCH_LIBS([Esys_Initialize], [tss2-esys],have_libtss=Intel))
-if test "$have_libtss" = IBM; then
+AC_ARG_WITH([tss],
+            [AS_HELP_STRING([--with-tss=TSS],
+                            [use the specified TPM Software Stack (ibm, intel, or autodetect)])],
+            [with_tss=$withval],
+            [with_tss=autodetect])
+LIBTSS_LIBS=
+LIBTSS_CFLAGS=
+if test "$build_tpm2d" = "yes"; then
+  _save_libs="$LIBS"
+  _save_cflags="$CFLAGS"
+  LIBS=""
+  if test "$with_tss" = autodetect; then
+    AC_SEARCH_LIBS([TSS_Create],[tss ibmtss],have_libtss=IBM,
+                   AC_SEARCH_LIBS([Esys_Initialize],[tss2-esys],have_libtss=Intel,have_libtss=no))
+  elif test "$with_tss" = ibm; then
+    AC_SEARCH_LIBS([TSS_Create],[tss ibmtss],have_libtss=IBM,
+                   [AC_MSG_ERROR([IBM TPM Software Stack requested but not found])])
+  elif test "$with_tss" = intel; then
+    AC_SEARCH_LIBS([Esys_Initialize],[tss2-esys],have_libtss=Intel,
+                   [AC_MSG_ERROR([Intel TPM Software Stack requested but not found])])
+  else
+    AC_MSG_ERROR([Invalid TPM Software Stack requested: $with_tss])
+  fi
+
+  if test "$have_libtss" = IBM; then
     LIBTSS_CFLAGS="-DTPM_POSIX"
     CFLAGS="$CFLAGS ${LIBTSS_CFLAGS}"
-    AC_CHECK_HEADER([tss2/tss.h],[AC_DEFINE(TSS_INCLUDE,tss2, [tss2 include location])], [
-	AC_CHECK_HEADER([ibmtss/tss.h],[AC_DEFINE(TSS_INCLUDE,ibmtss, [ibmtss include location])], [
-            AC_MSG_WARN([No TSS2 include directory found, disabling TPM support])
-	    have_libtss=no
-	])
+    AC_CHECK_HEADER([tss2/tss.h],
+                    [AC_DEFINE(TSS_INCLUDE,tss2, [tss2 include location])], [
+      AC_CHECK_HEADER([ibmtss/tss.h],[AC_DEFINE(TSS_INCLUDE,ibmtss,
+                                                [ibmtss include location])], [
+        AC_MSG_WARN([No TSS2 include directory found, disabling TPM support])
+        have_libtss=no
+      ])
     ])
     LIBTSS_LIBS=$LIBS
     AC_SUBST(TSS_INCLUDE)
-elif test "$have_libtss" = Intel; then
+  elif test "$have_libtss" = Intel; then
     ##
     # Intel TSS has an API issue: Esys_TR_GetTpmHandle wasn't introduced
     # until version 2.4.0.
@@ -1623,20 +1645,25 @@ elif test "$have_libtss" = Intel; then
     ])
     LIBTSS_LIBS="$LIBS -ltss2-mu -ltss2-rc -ltss2-tctildr"
     AC_DEFINE(HAVE_INTEL_TSS, 1, [Defined if we have the Intel TSS])
-fi
-LIBS="$_save_libs"
-CFLAGS="$_save_cflags"
-if test "$have_libtss" != no; then
+  fi
+  LIBS="$_save_libs"
+  CFLAGS="$_save_cflags"
+  if test "$have_libtss" != no; then
     AC_DEFINE(HAVE_LIBTSS, 1, [Defined if we have TPM2 support library])
     # look for a TPM emulator for testing
     AC_PATH_PROG(TPMSERVER, tpm_server,,/bin:/usr/bin:/usr/lib/ibmtss:/usr/libexec/ibmtss)
     AC_PATH_PROG(SWTPM, swtpm,,/bin:/usr/bin:/usr/lib/ibmtss:/usr/libexec/ibmtss)
     AC_PATH_PROG(SWTPM_IOCTL, swtpm_ioctl,,/bin:/usr/bin:/usr/lib/ibmtss:/usr/libexec/ibmtss)
+    AC_PATH_PROG(TSSSTARTUP, tssstartup,,/bin:/usr/bin:/usr/lib/ibmtss:/usr/libexec/ibmtss)
+  fi
+fi
+if test "$have_libtss" = no; then
+  build_tpm2d=no
 fi
 AC_SUBST(LIBTSS_LIBS)
 AC_SUBST(LIBTSS_CFLAGS)
 AM_CONDITIONAL(HAVE_LIBTSS, test "$have_libtss" != no)
-AM_CONDITIONAL(TEST_LIBTSS, test -n "$TPMSERVER" -o -n "$SWTPM")
+AM_CONDITIONAL(TEST_LIBTSS, test -n "$TPMSERVER" || test -n "$SWTPM" && test -n "$TSSSTARTUP")
 AC_SUBST(HAVE_LIBTSS)
 
 #
@@ -1854,6 +1881,7 @@ AM_CONDITIONAL(BUILD_SCDAEMON,    test "$build_scdaemon" = "yes")
 AM_CONDITIONAL(BUILD_G13,         test "$build_g13" = "yes")
 AM_CONDITIONAL(BUILD_DIRMNGR,     test "$build_dirmngr" = "yes")
 AM_CONDITIONAL(BUILD_KEYBOXD,     test "$build_keyboxd" = "yes")
+AM_CONDITIONAL(BUILD_TPM2D,       test "$build_tpm2d" = "yes")
 AM_CONDITIONAL(BUILD_DOC,         test "$build_doc" = "yes")
 AM_CONDITIONAL(BUILD_GPGTAR,      test "$build_gpgtar" = "yes")
 AM_CONDITIONAL(BUILD_WKS_TOOLS,   test "$build_wks_tools" = "yes")
@@ -1883,6 +1911,9 @@ if test "$build_dirmngr" = yes ; then
 fi
 if test "$build_keyboxd" = yes ; then
     AC_DEFINE(BUILD_WITH_KEYBOXD,1,[Defined if KEYBOXD is to be build])
+fi
+if test "$build_tpm2d" = yes ; then
+    AC_DEFINE(BUILD_WITH_TPM2D,1,[Defined if TPM2D to be build])
 fi
 if test "$build_g13" = yes ; then
     AC_DEFINE(BUILD_WITH_G13,1,[Defined if G13 is to be build])
@@ -2113,9 +2144,9 @@ doc/Makefile
 tests/Makefile
 tests/gpgscm/Makefile
 tests/openpgp/Makefile
-tests/tpm2dtests/Makefile
+tests/cms/Makefile
 tests/migrations/Makefile
-tests/gpgsm/Makefile
+tests/tpm2dtests/Makefile
 tests/gpgme/Makefile
 tests/pkits/Makefile
 g10/gpg.w32-manifest
@@ -2130,6 +2161,10 @@ tools/gpg-card.w32-manifest
 
 AC_OUTPUT
 
+show_tss_type=
+if test "$build_tpm2d" = "yes"; then
+  show_tss_type="($have_libtss)"
+fi
 
 echo "
         GnuPG v${VERSION} has been configured as follows:
@@ -2141,20 +2176,21 @@ echo "
         S/MIME:    $build_gpgsm
         Agent:     $build_agent
         Smartcard: $build_scdaemon $build_scdaemon_extra
+        TPM:       $build_tpm2d $show_tss_type
         G13:       $build_g13
         Dirmngr:   $build_dirmngr
         Keyboxd:   $build_keyboxd
         Gpgtar:    $build_gpgtar
         WKS tools: $build_wks_tools
 
-        Protect tool:      $show_gnupg_protect_tool_pgm
-        LDAP wrapper:      $show_gnupg_dirmngr_ldap_pgm
-        Default agent:     $show_gnupg_agent_pgm
-        Default pinentry:  $show_gnupg_pinentry_pgm
-        Default scdaemon:  $show_gnupg_scdaemon_pgm
-        Default keyboxd:   $show_gnupg_keyboxd_pgm
+        Protect tool:       $show_gnupg_protect_tool_pgm
+        LDAP wrapper:       $show_gnupg_dirmngr_ldap_pgm
+        Default agent:      $show_gnupg_agent_pgm
+        Default pinentry:   $show_gnupg_pinentry_pgm
+        Default scdaemon:   $show_gnupg_scdaemon_pgm
+        Default keyboxd:    $show_gnupg_keyboxd_pgm
         Default tpm2daemon: $show_gnupg_tpm2daemon_pgm
-        Default dirmngr:   $show_gnupg_dirmngr_pgm
+        Default dirmngr:    $show_gnupg_dirmngr_pgm
 
         Dirmngr auto start:  $dirmngr_auto_start
         Readline support:    $gnupg_cv_have_readline
@@ -2162,7 +2198,6 @@ echo "
         TLS support:         $use_tls_library
         TOFU support:        $use_tofu
         Tor support:         $show_tor_support
-        TPM support:         $have_libtss
 "
 if test "$have_libtss" != no -a -z "$TPMSERVER" -a -z "$SWTPM"; then
 cat <<G10EOF

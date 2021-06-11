@@ -58,7 +58,8 @@ app_help_count_bits (const unsigned char *a, size_t len)
  * there.  The caller needs to call gcry_sexp_release on that.  If
  * R_ALGO is not NULL the public key algorithm id of Libgcrypt is
  * stored there.  If R_ALGOSTR is not NULL and the function succeeds a
- * newly allocated algo string (e.g. "rsa2048") is stored there. */
+ * newly allocated algo string (e.g. "rsa2048") is stored there.
+ * HEXKEYGRIP may be NULL if the caller is not interested in it.  */
 gpg_error_t
 app_help_get_keygrip_string_pk (const void *pk, size_t pklen, char *hexkeygrip,
                                 gcry_sexp_t *r_pkey, int *r_algo,
@@ -76,7 +77,8 @@ app_help_get_keygrip_string_pk (const void *pk, size_t pklen, char *hexkeygrip,
   err = gcry_sexp_sscan (&s_pkey, NULL, pk, pklen);
   if (err)
     return err; /* Can't parse that S-expression. */
-  if (!gcry_pk_get_keygrip (s_pkey, array))
+
+  if (hexkeygrip && !gcry_pk_get_keygrip (s_pkey, array))
     {
       gcry_sexp_release (s_pkey);
       return gpg_error (GPG_ERR_GENERAL); /* Failed to calculate the keygrip.*/
@@ -101,7 +103,8 @@ app_help_get_keygrip_string_pk (const void *pk, size_t pklen, char *hexkeygrip,
   else
     gcry_sexp_release (s_pkey);
 
-  bin2hex (array, KEYGRIP_LEN, hexkeygrip);
+  if (hexkeygrip)
+    bin2hex (array, KEYGRIP_LEN, hexkeygrip);
 
   return 0;
 }
@@ -143,11 +146,13 @@ app_help_pubkey_from_cert (const void *cert, size_t certlen,
 {
   gpg_error_t err;
   ksba_cert_t kc;
-  unsigned char *pk;
-  size_t pklen;
+  unsigned char *pk, *fixed_pk;
+  size_t pklen, fixed_pklen;
 
   *r_pk = NULL;
   *r_pklen = 0;
+
+  pk = NULL; /*(avoid cc warning)*/
 
   err = ksba_cert_new (&kc);
   if (err)
@@ -164,6 +169,16 @@ app_help_pubkey_from_cert (const void *cert, size_t certlen,
       goto leave;
     }
   pklen = gcry_sexp_canon_len (pk, 0, NULL, &err);
+
+  err = uncompress_ecc_q_in_canon_sexp (pk, pklen, &fixed_pk, &fixed_pklen);
+  if (err)
+    goto leave;
+  if (fixed_pk)
+    {
+      ksba_free (pk); pk = NULL;
+      pk = fixed_pk;
+      pklen = fixed_pklen;
+    }
 
  leave:
   if (!err)

@@ -614,7 +614,7 @@ speedo_pkg_ntbtls_configure = --disable-shared
 
 ifeq ($(TARGETOS),w32)
 speedo_pkg_gnupg_configure = \
-        --disable-g13 --enable-ntbtls
+        --disable-g13 --enable-ntbtls --disable-tpm2d
 else
 speedo_pkg_gnupg_configure = --disable-g13 --enable-wks-tools
 endif
@@ -1430,7 +1430,7 @@ define AUTHENTICODE_sign
      echo "speedo: Signing via host $(AUTHENTICODE_SIGNHOST)";\
      scp $(1) "$(AUTHENTICODE_SIGNHOST):a.exe" ;\
      ssh "$(AUTHENTICODE_SIGNHOST)" '$(AUTHENTICODE_TOOL)' sign \
-        /n '"g10 Code GmbH"' \
+        /a /n '"g10 Code GmbH"' \
         /tr 'http://rfc3161timestamp.globalsign.com/advanced' /td sha256 \
         /fd sha256 /du https://gnupg.org a.exe ;\
      scp "$(AUTHENTICODE_SIGNHOST):a.exe" $(2);\

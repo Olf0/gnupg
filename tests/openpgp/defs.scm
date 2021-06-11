@@ -192,7 +192,7 @@
 
 (define (tool which)
   (case which
-    ((gpg gpg-agent scdaemon gpgsm dirmngr)
+    ((gpg gpg-agent scdaemon gpgsm keyboxd dirmngr)
      (:gc:c:pgmname (assoc (symbol->string which) gpg-components)))
     (else
      (tool-hardcoded which))))
@@ -335,6 +335,12 @@
   (if (flag "--use-keyring" *args*)
       (create-file "pubring.gpg"))
 
+  (create-file "common.conf"
+	       (if (flag "--use-keyboxd" *args*)
+		   "use-keyboxd" "#use-keyboxd")
+	       (string-append "keyboxd-program " (tool 'keyboxd))
+	       )
+
   (create-file "gpg.conf"
                ;;"log-file socket:///tmp/S.wklog"
                ;;"verbose"
@@ -352,8 +358,6 @@
 	       (string-append "agent-program "
 			      (tool 'gpg-agent)
 			      "|--debug-quick-random\n")
-	       (if (flag "--use-keyboxd" *args*)
-		   "use-keyboxd" "#use-keyboxd")
 	       )
   (create-file "keyboxd.conf"
                ;;"log-file socket:///tmp/S.wklog"

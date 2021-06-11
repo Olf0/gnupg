@@ -997,7 +997,7 @@ write_signature_packets (ctrl_t ctrl,
 
 
 /*
- * Sign the files whose names are in FILENAME usingall secret keys
+ * Sign the files whose names are in FILENAME using all secret keys
  * which can be taken from LOCUSR, if this is NULL, use the default
  * secret key.
  * If DETACHED has the value true, make a detached signature.
@@ -1394,6 +1394,7 @@ clearsign_file (ctrl_t ctrl,
   SK_LIST sk_list = NULL;
   SK_LIST sk_rover = NULL;
   u32 duration = 0;
+  pt_extra_hash_data_t extrahash = NULL;
 
   pfx = new_progress_context ();
   afx = new_armor_context ();
@@ -1502,9 +1503,23 @@ clearsign_file (ctrl_t ctrl,
   afx->what = 2;
   push_armor_filter (afx, out);
 
+  /* Prepare EXTRAHASH, so that it can be used for v5 signature.  */
+  extrahash = xtrymalloc (sizeof *extrahash);
+  if (!extrahash)
+    {
+      rc = gpg_error_from_syserror ();
+      goto leave;
+    }
+  else
+    {
+      extrahash->mode = 't';
+      extrahash->timestamp = 0;
+      extrahash->namelen = 0;
+    }
+
   /* Write the signatures.  */
-  rc = write_signature_packets (ctrl, sk_list, out, textmd, NULL, 0x01, 0,
-                                duration, 'C', NULL);
+  rc = write_signature_packets (ctrl, sk_list, out, textmd, extrahash,
+                                0x01, 0, duration, 'C', NULL);
   if (rc)
     goto leave;
 
@@ -1518,6 +1533,7 @@ clearsign_file (ctrl_t ctrl,
   release_sk_list (sk_list);
   release_progress_context (pfx);
   release_armor_context (afx);
+  xfree (extrahash);
   return rc;
 }
 
@@ -1589,7 +1605,7 @@ sign_symencrypt_file (ctrl_t ctrl, const char *fname, strlist_t locusr)
   s2k->hash_algo = S2K_DIGEST_ALGO;
 
   algo = default_cipher_algo ();
-  cfx.dek = passphrase_to_dek (algo, s2k, 1, 1, NULL, &canceled);
+  cfx.dek = passphrase_to_dek (algo, s2k, 1, 1, NULL, 0, &canceled);
 
   if (!cfx.dek || !cfx.dek->keylen)
     {

@@ -408,7 +408,8 @@ proc_symkey_enc (CTX c, PACKET *pkt)
         }
       else
         {
-          c->dek = passphrase_to_dek (algo, &enc->s2k, 0, 0, NULL, NULL);
+          c->dek = passphrase_to_dek (algo, &enc->s2k, 0, 0, NULL,
+                                      GETPASSWORD_FLAG_SYMDECRYPT, NULL);
           if (c->dek)
             {
               c->dek->symmetric = 1;
@@ -663,7 +664,8 @@ proc_encrypted (CTX c, PACKET *pkt)
               log_info (_("assuming %s encrypted data\n"), "IDEA");
             }
 
-          c->dek = passphrase_to_dek (algo, s2k, 0, 0, NULL, &canceled);
+          c->dek = passphrase_to_dek (algo, s2k, 0, 0, NULL,
+                                      GETPASSWORD_FLAG_SYMDECRYPT, &canceled);
           if (c->dek)
             c->dek->algo_info_printed = 1;
           else if (canceled)
@@ -2011,7 +2013,8 @@ check_sig_and_print (CTX c, kbnode_t node)
                   free_public_key (pk);
                   pk = NULL;
                   glo_ctrl.in_auto_key_retrieve++;
-                  res = keyserver_import_keyid (c->ctrl, sig->keyid,spec, 1);
+                  res = keyserver_import_keyid (c->ctrl, sig->keyid,spec,
+                                                KEYSERVER_IMPORT_FLAG_QUICK);
                   glo_ctrl.in_auto_key_retrieve--;
                   if (!res)
                     rc = do_check_sig (c, node, extrahash, extrahashlen, NULL,
@@ -2050,7 +2053,8 @@ check_sig_and_print (CTX c, kbnode_t node)
       free_public_key (pk);
       pk = NULL;
       glo_ctrl.in_auto_key_retrieve++;
-      res = keyserver_import_wkd (c->ctrl, sig->signers_uid, 1, NULL, NULL);
+      res = keyserver_import_wkd (c->ctrl, sig->signers_uid,
+                                  KEYSERVER_IMPORT_FLAG_QUICK, NULL, NULL);
       glo_ctrl.in_auto_key_retrieve--;
       /* Fixme: If the fingerprint is embedded in the signature,
        * compare it to the fingerprint of the returned key.  */
@@ -2082,7 +2086,8 @@ check_sig_and_print (CTX c, kbnode_t node)
           free_public_key (pk);
           pk = NULL;
           glo_ctrl.in_auto_key_retrieve++;
-          res = keyserver_import_fprint (c->ctrl, p, n, opt.keyserver, 1);
+          res = keyserver_import_fprint (c->ctrl, p, n, opt.keyserver,
+                                         KEYSERVER_IMPORT_FLAG_QUICK);
           glo_ctrl.in_auto_key_retrieve--;
           if (!res)
             rc = do_check_sig (c, node, extrahash, extrahashlen, NULL,

@@ -420,7 +420,7 @@ cmd_switchapp (assuan_context_t ctx, char *line)
 
 
 static const char hlp_learn[] =
-  "LEARN [--force] [--keypairinfo] [--multi]\n"
+  "LEARN [--force] [--keypairinfo] [--reread] [--multi]\n"
   "\n"
   "Learn all useful information of the currently inserted card.  When\n"
   "used without the force options, the command might do an INQUIRE\n"
@@ -433,7 +433,8 @@ static const char hlp_learn[] =
   "error message.\n"
   "\n"
   "With the option --keypairinfo only KEYPAIRINFO status lines are\n"
-  "returned.\n"
+  "returned.  With the option --reread information from the card are\n"
+  "read again without the need for a reset (sone some cards).\n"
   "\n"
   "The response of this command is a list of status lines formatted as\n"
   "this:\n"
@@ -458,7 +459,7 @@ static const char hlp_learn[] =
   "to the keypair info, information about all certificates stored on the\n"
   "card is also returned:\n"
   "\n"
-  "  S CERTINFO <certtype> <hexstring_with_id>\n"
+  "  S CERTINFO <certtype> <keyref> [<label>]\n"
   "\n"
   "Where CERTTYPE is a number indicating the type of certificate:\n"
   "   0   := Unknown\n"
@@ -470,11 +471,11 @@ static const char hlp_learn[] =
   "\n"
   "For certain cards, more information will be returned:\n"
   "\n"
-  "  S KEY-FPR <no> <hexstring>\n"
+  "  S KEY-FPR <keyref> <hexstring>\n"
   "\n"
-  "For OpenPGP cards this returns the stored fingerprints of the\n"
+  "For some cards this returns the stored fingerprints of the\n"
   "keys. This can be used check whether a key is available on the\n"
-  "card.  NO may be 1, 2 or 3.\n"
+  "card.  KEYREF may be 1, 2 or 3 for OpenPGP or a standard keyref.\n"
   "\n"
   "  S CA-FPR <no> <hexstring>\n"
   "\n"
@@ -498,6 +499,8 @@ cmd_learn (assuan_context_t ctx, char *line)
   int rc = 0;
   int only_keypairinfo = has_option (line, "--keypairinfo");
   int opt_multi = has_option (line, "--multi");
+  int opt_reread = has_option (line, "--reread");
+  unsigned int flags;
 
   if ((rc = open_card (ctrl)))
     return rc;
@@ -559,11 +562,16 @@ cmd_learn (assuan_context_t ctx, char *line)
 
   /* Let the application print out its collection of useful status
      information. */
+  flags = 0;
+  if (only_keypairinfo)
+    flags |= APP_LEARN_FLAG_KEYPAIRINFO;
+  if (opt_multi)
+    flags |= APP_LEARN_FLAG_MULTI;
+  if (opt_reread)
+    flags |= APP_LEARN_FLAG_REREAD;
+
   if (!rc)
-    rc = app_write_learn_status
-      (ctrl->card_ctx, ctrl,
-       ( (only_keypairinfo? APP_LEARN_FLAG_KEYPAIRINFO : 0)
-         | (opt_multi? APP_LEARN_FLAG_MULTI : 0)) );
+    rc = app_write_learn_status (ctrl->card_ctx, ctrl, flags);
 
   return rc;
 }
@@ -608,19 +616,19 @@ cmd_readcert (assuan_context_t ctx, char *line)
 
 static gpg_error_t
 do_readkey (card_t card, ctrl_t ctrl, const char *line,
-            int opt_info, int opt_nokey,
-            unsigned char **pk_p, size_t *pklen_p)
+            int opt_info, unsigned char **pk_p, size_t *pklen_p)
 {
   int rc;
+  int direct_readkey = 0;
 
   /* If the application supports the READKEY function we use that.
      Otherwise we use the old way by extracting it from the
      certificate.  */
   rc = app_readkey (card, ctrl, line,
                     opt_info? APP_READKEY_FLAG_INFO : 0,
-                    opt_nokey? NULL : pk_p, pklen_p);
+                    pk_p, pklen_p);
   if (!rc)
-    ; /* Got the key.  */
+    direct_readkey = 1; /* Got the key.  */
   else if (gpg_err_code (rc) == GPG_ERR_UNSUPPORTED_OPERATION
            || gpg_err_code (rc) == GPG_ERR_NOT_FOUND)
     {
@@ -643,7 +651,7 @@ do_readkey (card_t card, ctrl_t ctrl, const char *line,
   else
     log_error ("app_readkey failed: %s\n", gpg_strerror (rc));
 
-  if (!rc && opt_info)
+  if (!rc && opt_info && !direct_readkey)
     {
       char keygripstr[KEYGRIP_LEN*2+1];
       char *algostr;
@@ -722,7 +730,7 @@ cmd_readkey (assuan_context_t ctx, char *line)
       if (direct)
         card_ref (card);
 
-      rc = do_readkey (card, ctrl, line, opt_info, opt_nokey, &pk, &pklen);
+      rc = do_readkey (card, ctrl, line, opt_info, &pk, &pklen);
 
       if (direct)
         card_unref (card);
@@ -1430,7 +1438,10 @@ cmd_genkey (assuan_context_t ctx, char *line)
 
   line = skip_options (line);
   if (!*line)
-    return set_error (GPG_ERR_ASS_PARAMETER, "no key number given");
+    {
+      err = set_error (GPG_ERR_ASS_PARAMETER, "no key number given");
+      goto leave;
+    }
   keyref = line;
   while (*line && !spacep (line))
     line++;
@@ -1440,7 +1451,10 @@ cmd_genkey (assuan_context_t ctx, char *line)
     goto leave;
 
   if (!ctrl->card_ctx)
-    return gpg_error (GPG_ERR_UNSUPPORTED_OPERATION);
+    {
+      err = gpg_error (GPG_ERR_UNSUPPORTED_OPERATION);
+      goto leave;
+    }
 
   keyref = keyref_buffer = xtrystrdup (keyref);
   if (!keyref)
@@ -1590,7 +1604,11 @@ static const char hlp_checkpin[] =
   "   For a definitive list, see the implementation in app-nks.c.\n"
   "   Note that we call a PW2.* PIN a \"PUK\" despite that since TCOS\n"
   "   3.0 they are technically alternative PINs used to mutally\n"
-  "   unblock each other.";
+  "   unblock each other.\n"
+  "\n"
+  "For PKCS#15:\n"
+  "\n"
+  "   The key's ID string or the PIN's label may be used.";
 static gpg_error_t
 cmd_checkpin (assuan_context_t ctx, char *line)
 {
@@ -2458,15 +2476,17 @@ send_status_info (ctrl_t ctrl, const char *keyword, ...)
 
 
 /* Send a ready formatted status line via assuan.  */
-void
+gpg_error_t
 send_status_direct (ctrl_t ctrl, const char *keyword, const char *args)
 {
   assuan_context_t ctx = ctrl->server_local->assuan_ctx;
 
   if (strchr (args, '\n'))
-    log_error ("error: LF detected in status line - not sending\n");
-  else
-    assuan_write_status (ctx, keyword, args);
+    {
+      log_error ("error: LF detected in status line - not sending\n");
+      return gpg_error (GPG_ERR_INTERNAL);
+    }
+  return assuan_write_status (ctx, keyword, args);
 }
 
 
